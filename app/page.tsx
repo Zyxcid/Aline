@@ -5,35 +5,76 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, useGLTF, Stage } from '@react-three/drei';
 import * as THREE from 'three';
 
+const MODIFIER_KEYS = [
+  { id: 'ctrl', label: 'CTRL' },
+  { id: 'shift', label: 'SHIFT' },
+  { id: 'alt', label: 'ALT' },
+  { id: 'win', label: 'WIN' },
+];
+
 const AVAILABLE_KEYCODES = [
-  { group: 'Letters', keys: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'] },
-  { group: 'Numbers', keys: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'] },
+  { 
+    group: 'Navigation & Special', 
+    keys: ['enter', 'backspace', 'space', 'tab', 'esc', 'delete', 'capslock', 'up', 'down', 'left', 'right'] 
+  },
+  { 
+    group: 'Letters', 
+    keys: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'] 
+  },
+  { 
+    group: 'Numbers & Symbols', 
+    keys: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f12'] 
+  },
 ];
 
 type ColorPalette = {
+  id: string;
   name: string;
+  bg: string;
   case: string;
   keycaps: string;
 };
 
-const DEFAULT_PALETTE: ColorPalette = {
-  name: 'Dark Stealth',
-  case: '#1e293b',
-  keycaps: '#334155',
-};
+const PALETTES: ColorPalette[] = [
+  { id: 'dark', name: 'Dark Stealth', bg: '#0f172a', case: '#1e293b', keycaps: '#334155' },
+  { id: 'cyber', name: 'Cyberpunk', bg: '#18042c', case: '#2d0b5a', keycaps: '#ec4899' },
+  { id: 'retro', name: 'Retro Light', bg: '#f1f5f9', case: '#cbd5e1', keycaps: '#64748b' },
+  { id: 'mint', name: 'Mint Breeze', bg: '#022c22', case: '#064e3b', keycaps: '#10b981' },
+];
 
 type ModeKeymap = string[];
+
+// Helper untuk mendeteksi apakah warna HEX tergolong terang
+function isLightColor(hex: string): boolean {
+  let cleanHex = hex.replace('#', '');
+  if (cleanHex.length === 3) {
+    cleanHex = cleanHex.split('').map((c) => c + c).join('');
+  }
+  const r = parseInt(cleanHex.substring(0, 2), 16) || 0;
+  const g = parseInt(cleanHex.substring(2, 4), 16) || 0;
+  const b = parseInt(cleanHex.substring(4, 6), 16) || 0;
+
+  const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+  return brightness > 155;
+}
+
+function getDynamicContrastColor(hex: string) {
+  return isLightColor(hex) ? '#1e3a8a' : '#fbbf24';
+}
 
 function KeyboardModel({
   colorPalette,
   selectedKey,
   onSelectKey,
+  isInteractive,
 }: {
   colorPalette: ColorPalette;
   selectedKey: string | null;
   onSelectKey: (keyName: string) => void;
+  isInteractive: boolean;
 }) {
   const { scene } = useGLTF('/Aline.glb');
+  const selectionColor = getDynamicContrastColor(colorPalette.keycaps);
 
   useEffect(() => {
     scene.traverse((child) => {
@@ -51,7 +92,7 @@ function KeyboardModel({
           const isSelected = selectedKey && rawName.includes(selectedKey.toLowerCase());
 
           if (isSelected) {
-            material.color.set('#f59e0b');
+            material.color.set(selectionColor);
           } else if (rawName.includes('key')) {
             material.color.set(colorPalette.keycaps);
           } else {
@@ -64,12 +105,13 @@ function KeyboardModel({
         }
       }
     });
-  }, [scene, colorPalette, selectedKey]);
+  }, [scene, colorPalette, selectedKey, selectionColor]);
 
   return (
     <primitive
       object={scene}
-      onClick={(e: any) => {
+      onPointerDown={(e: any) => {
+        if (!isInteractive) return;
         e.stopPropagation();
         const rawName = e.object.name.toLowerCase();
         const validKeys = ['key_1', 'key_2', 'key_3', 'key_4', 'key_5'];
@@ -84,31 +126,102 @@ function KeyboardModel({
 }
 
 export default function Home() {
-  const [currentPalette] = useState<ColorPalette>(DEFAULT_PALETTE);
+  const [currentPalette, setCurrentPalette] = useState<ColorPalette>(PALETTES[0]);
+  const [isCustomTheme, setIsCustomTheme] = useState(false);
   const [selectedKeyName, setSelectedKeyName] = useState<string | null>(null);
 
+  const [viewMode, setViewMode] = useState<'hero' | 'config'>('hero');
+
   const [activeMode, setActiveMode] = useState<'modeA' | 'modeB'>('modeA');
-  const [modeA, setModeA] = useState<ModeKeymap>(['s', 'a', 'w', 'd', 'r']);
+  const [modeAName, setModeAName] = useState('Default Work');
+  const [modeBName, setModeBName] = useState('Gaming / Secondary');
+
+  const [modeA, setModeA] = useState<ModeKeymap>(['s', 'ctrl+a', 'ctrl+shift+w', 'd', 'r']);
   const [modeB, setModeB] = useState<ModeKeymap>(['z', 'x', 'c', 'v', 'y']);
+
+  // Deteksi status kontras warna berdasarkan warna latar saat ini
+  const isBgLight = isLightColor(currentPalette.bg);
+  const textColor = isBgLight ? '#0f172a' : '#ffffff';
+  const subTextColor = isBgLight ? '#334155' : '#94a3b8';
+  const glassBg = isBgLight ? 'rgba(255, 255, 255, 0.75)' : 'rgba(15, 23, 42, 0.55)';
+  const glassPanelBg = isBgLight ? 'rgba(255, 255, 255, 0.9)' : 'rgba(15, 23, 42, 0.85)';
+  const glassBorder = isBgLight ? 'rgba(0, 0, 0, 0.12)' : 'rgba(255, 255, 255, 0.12)';
+  const itemBg = isBgLight ? 'rgba(0, 0, 0, 0.05)' : 'rgba(255, 255, 255, 0.04)';
+
+  // Scroll handler untuk Hero
+  useEffect(() => {
+    let timeoutId: NodeJS.Timeout;
+
+    const handleWheel = (e: WheelEvent) => {
+      if (viewMode === 'hero') {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          if (e.deltaY > 20) {
+            setViewMode('config');
+          }
+        }, 50);
+      }
+    };
+
+    window.addEventListener('wheel', handleWheel, { passive: true });
+    return () => {
+      window.removeEventListener('wheel', handleWheel);
+      clearTimeout(timeoutId);
+    };
+  }, [viewMode]);
+
+  useEffect(() => {
+    try {
+      const savedConfig = localStorage.getItem('aline_config');
+      if (savedConfig) {
+        const parsed = JSON.parse(savedConfig);
+        if (parsed.modeA) setModeA(parsed.modeA);
+        if (parsed.modeB) setModeB(parsed.modeB);
+        if (parsed.modeAName) setModeAName(parsed.modeAName);
+        if (parsed.modeBName) setModeBName(parsed.modeBName);
+        if (parsed.palette) setCurrentPalette(parsed.palette);
+        if (parsed.isCustomTheme !== undefined) setIsCustomTheme(parsed.isCustomTheme);
+      }
+    } catch (e) {
+      console.error('Failed to load LocalStorage:', e);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const dataToSave = {
+        modeA,
+        modeB,
+        modeAName,
+        modeBName,
+        palette: currentPalette,
+        isCustomTheme,
+      };
+      localStorage.setItem('aline_config', JSON.stringify(dataToSave));
+    } catch (e) {
+      console.error('Failed to save LocalStorage:', e);
+    }
+  }, [modeA, modeB, modeAName, modeBName, currentPalette, isCustomTheme]);
+
+  const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (selectedKeyName && selectedKeyName.startsWith('key_')) {
+      const keyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
+      const currentBinding = activeMode === 'modeA' ? modeA[keyIndex] : modeB[keyIndex];
+      const parts = (currentBinding || '').split('+');
+      const existingMods = parts.slice(0, parts.length - 1);
+      setSelectedModifiers(existingMods);
+    }
+  }, [selectedKeyName, activeMode, modeA, modeB]);
 
   const [isConnected, setIsConnected] = useState(false);
   const portRef = useRef<any>(null);
   const readerRef = useRef<any>(null);
 
-  const heroRef = useRef<HTMLDivElement>(null);
-  const configSectionRef = useRef<HTMLDivElement>(null);
-
-  const scrollToConfig = () => {
-    configSectionRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  const scrollToHero = () => {
-    heroRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
   const connectSerial = async () => {
     if (!('serial' in navigator)) {
-      alert('Your browser does not support Web Serial API. Please use Chrome, Edge, or Opera.');
+      alert('Browser Anda belum mendukung Web Serial API.');
       return;
     }
 
@@ -121,14 +234,13 @@ export default function Home() {
       readSerialData(port);
       sendSerialMessage({ type: 'GET_KEYMAP' });
     } catch (err) {
-      console.error('Failed to connect via Serial:', err);
+      console.error('Serial Connection error:', err);
       setIsConnected(false);
     }
   };
 
   const sendSerialMessage = async (dataObj: any) => {
     if (!portRef.current || !portRef.current.writable) return;
-
     const writer = portRef.current.writable.getWriter();
     const jsonString = JSON.stringify(dataObj) + '\n';
     const encoder = new TextEncoder();
@@ -143,7 +255,6 @@ export default function Home() {
     readerRef.current = reader;
 
     let buffer = '';
-
     try {
       while (true) {
         const { value, done } = await reader.read();
@@ -160,9 +271,6 @@ export default function Home() {
             if (data.type === 'KEYMAP_RESPONSE') {
               if (data.modeA) setModeA(data.modeA);
               if (data.modeB) setModeB(data.modeB);
-              alert('Keymap successfully read from Aline!');
-            } else if (data.status === 'SUCCESS') {
-              alert('Keymap successfully saved to Aline!');
             }
           } catch (e) {
             console.log('Raw Serial Response:', line);
@@ -177,333 +285,664 @@ export default function Home() {
   };
 
   const handleSaveToRP2040 = () => {
-    sendSerialMessage({
-      type: 'SET_KEYMAP',
-      modeA,
-      modeB,
-    });
+    sendSerialMessage({ type: 'SET_KEYMAP', modeA, modeB });
   };
 
-  const handleAssignKeycode = (keycode: string) => {
+  const toggleModifier = (modId: string) => {
+    if (selectedModifiers.includes(modId)) {
+      setSelectedModifiers(selectedModifiers.filter((m) => m !== modId));
+    } else {
+      setSelectedModifiers([...selectedModifiers, modId]);
+    }
+  };
+
+  const handleAssignKeycode = (primaryKey: string) => {
     if (!selectedKeyName || !selectedKeyName.startsWith('key_')) return;
 
     const keyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
+    const fullBinding = [...selectedModifiers, primaryKey.toLowerCase()].join('+');
 
     if (activeMode === 'modeA') {
       const updated = [...modeA];
-      updated[keyIndex] = keycode.toLowerCase();
+      updated[keyIndex] = fullBinding;
       setModeA(updated);
     } else {
       const updated = [...modeB];
-      updated[keyIndex] = keycode.toLowerCase();
+      updated[keyIndex] = fullBinding;
       setModeB(updated);
     }
   };
 
+  const handleCustomColorChange = (key: 'bg' | 'case' | 'keycaps', colorValue: string) => {
+    setIsCustomTheme(true);
+    setCurrentPalette((prev) => ({
+      ...prev,
+      id: 'custom',
+      name: 'Custom',
+      [key]: colorValue,
+    }));
+  };
+
   const currentKeymap = activeMode === 'modeA' ? modeA : modeB;
+  const currentModeLabel = activeMode === 'modeA' ? modeAName : modeBName;
 
   return (
     <main
       style={{
-        backgroundColor: '#0f172a',
-        color: '#fff',
+        backgroundColor: currentPalette.bg,
+        color: textColor,
         fontFamily: 'sans-serif',
         height: '100vh',
         width: '100vw',
         overflow: 'hidden',
+        position: 'relative',
+        transition: 'background-color 0.5s ease, color 0.5s ease',
       }}
     >
-      {/* SECTION 1: HERO */}
-      <section
-        ref={heroRef}
+      {/* 1. PERSISTENT 3D CANVAS LAYER */}
+      <div
         style={{
-          height: '100vh',
-          width: '100vw',
-          padding: '40px 20px',
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          textAlign: 'center',
-          maxWidth: '800px',
-          margin: '0 auto',
-          boxSizing: 'border-box',
+          position: 'absolute',
+          inset: 0,
+          zIndex: 2,
+          transition: 'transform 0.8s cubic-bezier(0.16, 1, 0.3, 1)',
+          transform: viewMode === 'hero' ? 'scale(1)' : 'scale(1.08)',
+          pointerEvents: viewMode === 'config' ? 'auto' : 'none',
         }}
       >
-        <h1 style={{ fontSize: '3.2rem', fontWeight: 'bold', marginBottom: '16px', background: 'linear-gradient(to right, #60a5fa, #3b82f6)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
-          Aline
-        </h1>
-        <p style={{ fontSize: '1.1rem', color: '#94a3b8', lineHeight: '1.6', marginBottom: '32px' }}>
-          An interactive web configurator for custom 5-key macropads. Effortlessly remap keys in real-time and save directly to your RP2040 EEPROM via Web Serial.
-        </p>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', width: '100%', marginBottom: '40px', textAlign: 'left' }}>
-          <div style={{ background: '#1e293b', padding: '16px', borderRadius: '12px', border: '1px solid #334155' }}>
-            <div style={{ fontSize: '11px', color: '#38bdf8', fontWeight: 'bold' }}>MICROCONTROLLER</div>
-            <div style={{ fontWeight: 'bold', fontSize: '14px', marginTop: '4px' }}>RP2040 Zero</div>
-          </div>
-          <div style={{ background: '#1e293b', padding: '16px', borderRadius: '12px', border: '1px solid #334155' }}>
-            <div style={{ fontSize: '11px', color: '#38bdf8', fontWeight: 'bold' }}>SWITCHES</div>
-            <div style={{ fontWeight: 'bold', fontSize: '14px', marginTop: '4px' }}>5x MX Mechanical Switches</div>
-          </div>
-          <div style={{ background: '#1e293b', padding: '16px', borderRadius: '12px', border: '1px solid #334155' }}>
-            <div style={{ fontSize: '11px', color: '#38bdf8', fontWeight: 'bold' }}>MODE SWITCH</div>
-            <div style={{ fontWeight: 'bold', fontSize: '14px', marginTop: '4px' }}>SPDT Slide Switch</div>
-          </div>
-        </div>
-
-        <button
-          onClick={scrollToConfig}
-          style={{
-            padding: '14px 28px',
-            fontSize: '1rem',
-            fontWeight: 'bold',
-            color: '#fff',
-            backgroundColor: '#2563eb',
-            border: 'none',
-            borderRadius: '12px',
-            cursor: 'pointer',
-            boxShadow: '0 10px 15px -3px rgba(37, 99, 235, 0.4)',
-            transition: 'all 0.2s ease',
-          }}
-          onMouseOver={(e) => (e.currentTarget.style.backgroundColor = '#1d4ed8')}
-          onMouseOut={(e) => (e.currentTarget.style.backgroundColor = '#2563eb')}
-        >
-          Config Aline ⚙️
-        </button>
-      </section>
-
-      {/* SECTION 2: FULLSCREEN 3D MODEL & CONFIGURATOR (100vw x 100vh) */}
-      <section
-        ref={configSectionRef}
-        style={{
-          height: '100vh',
-          width: '100vw',
-          position: 'relative',
-          overflow: 'hidden',
-          boxSizing: 'border-box',
-        }}
-      >
-        <div style={{ position: 'absolute', top: '30px', left: '50%', transform: 'translateX(-50%)', zIndex: 10, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button
-              onClick={scrollToHero}
-              style={{
-                padding: '8px 16px',
-                borderRadius: '8px',
-                border: '1px solid #334155',
-                backgroundColor: 'rgba(30, 41, 59, 0.8)',
-                color: '#fff',
-                fontWeight: 'bold',
-                cursor: 'pointer',
-                fontSize: '12px',
-                backdropFilter: 'blur(8px)',
-              }}
-            >
-              ← Back
-            </button>
-
-            <button
-              onClick={connectSerial}
-              style={{
-                padding: '8px 16px',
-                borderRadius: '8px',
-                border: 'none',
-                backgroundColor: isConnected ? '#10b981' : '#2563eb',
-                color: '#fff',
-                fontWeight: 'bold',
-                cursor: 'pointer',
-                fontSize: '12px',
-              }}
-            >
-              {isConnected ? '✓ Connected' : '🔌 Connect Aline'}
-            </button>
-
-            {isConnected && (
-              <button
-                onClick={handleSaveToRP2040}
-                style={{
-                  padding: '8px 16px',
-                  borderRadius: '8px',
-                  border: 'none',
-                  backgroundColor: '#f59e0b',
-                  color: '#fff',
-                  fontWeight: 'bold',
-                  cursor: 'pointer',
-                  fontSize: '12px',
-                }}
-              >
-                💾 Save to Aline
-              </button>
-            )}
-          </div>
-
-          <div style={{ backgroundColor: 'rgba(245, 158, 11, 0.15)', border: '1px solid #f59e0b', color: '#f59e0b', padding: '6px 14px', borderRadius: '20px', fontSize: '11px', fontWeight: 'bold', backdropFilter: 'blur(8px)' }}>
-            💡 Hint: Click any keycap to customize
-          </div>
-        </div>
-
-        {/* Fullscreen 3D Canvas */}
-        <Canvas camera={{ position: [0, 5, 10], fov: 45 }} style={{ width: '100%', height: '100%' }}>
+        <Canvas camera={{ position: [0, 4, 8], fov: 40 }} style={{ width: '100%', height: '100%' }}>
           <Suspense fallback={null}>
-            <Stage environment="city" intensity={0.6}>
+            <Stage environment="city" intensity={0.7}>
               <KeyboardModel
                 colorPalette={currentPalette}
                 selectedKey={selectedKeyName}
-                onSelectKey={(name) => setSelectedKeyName(name)}
+                isInteractive={viewMode === 'config'}
+                onSelectKey={(keyName) => {
+                  setSelectedKeyName(keyName);
+                }}
               />
             </Stage>
           </Suspense>
-          <OrbitControls enableZoom={false} autoRotate={!selectedKeyName} autoRotateSpeed={0.8} makeDefault />
+          <OrbitControls
+            enableRotate={viewMode === 'config'}
+            enableZoom={viewMode === 'config'}
+            autoRotate={viewMode === 'hero'}
+            autoRotateSpeed={1.2}
+            makeDefault
+          />
         </Canvas>
+      </div>
 
-        {/* Floating Panel: Mode Selection (Bottom Left) */}
+      {/* 2. OVERLAY DYNAMIC DARK/LIGHT FADE */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 3,
+          backgroundColor: currentPalette.bg,
+          opacity: viewMode === 'hero' ? 0.75 : 0.05,
+          backdropFilter: viewMode === 'hero' ? 'blur(10px)' : 'blur(0px)',
+          WebkitBackdropFilter: viewMode === 'hero' ? 'blur(10px)' : 'blur(0px)',
+          transition: 'all 0.8s cubic-bezier(0.16, 1, 0.3, 1)',
+          pointerEvents: 'none',
+        }}
+      />
+
+      {/* 3. HERO OVERLAY UI */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 4,
+          padding: '0 80px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          boxSizing: 'border-box',
+          opacity: viewMode === 'hero' ? 1 : 0,
+          pointerEvents: 'none',
+          transform: viewMode === 'hero' ? 'translateY(0)' : 'translateY(-30px)',
+          transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+      >
+        {/* Left Hero Text */}
+        <div style={{ maxWidth: '520px', display: 'flex', flexDirection: 'column', gap: '24px', pointerEvents: viewMode === 'hero' ? 'auto' : 'none' }}>
+          {/* Judul dengan kontras dinamis bebas kotak hitam */}
+          <h1
+            style={{
+              fontSize: '4rem',
+              fontWeight: '900',
+              lineHeight: '1.05',
+              letterSpacing: '-0.03em',
+              margin: 0,
+              color: textColor,
+            }}
+          >
+            Aline Configurator
+          </h1>
+
+          <p style={{ fontSize: '1.15rem', color: subTextColor, lineHeight: '1.6', margin: 0 }}>
+            Craft your ultimate physical productivity tool. Customize keybindings, switch profiles, and sync live to RP2040 hardware via Web Serial.
+          </p>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', alignItems: 'flex-start' }}>
+            <button
+              onClick={() => setViewMode('config')}
+              style={{
+                position: 'relative',
+                padding: '18px 40px',
+                fontSize: '1.05rem',
+                fontWeight: '800',
+                color: '#ffffff',
+                background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)',
+                border: '1px solid rgba(255, 255, 255, 0.3)',
+                borderRadius: '16px',
+                cursor: 'pointer',
+                boxShadow: '0 12px 30px -6px rgba(37, 99, 235, 0.5)',
+                transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '12px',
+                letterSpacing: '0.02em',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'translateY(-3px) scale(1.02)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'translateY(0) scale(1)';
+              }}
+            >
+              <span>Start Customizing</span>
+              <span style={{ fontSize: '1.2rem' }}>⚙️</span>
+            </button>
+
+            <div
+              onClick={() => setViewMode('config')}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                color: subTextColor,
+                fontSize: '12px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                userSelect: 'none',
+              }}
+            >
+              <span>↓ Scroll down or click to customize</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Glass Card */}
+        <div
+          style={{
+            width: '360px',
+            backgroundColor: glassBg,
+            backdropFilter: 'blur(20px)',
+            borderRadius: '28px',
+            padding: '28px',
+            border: `1px solid ${glassBorder}`,
+            boxShadow: '0 30px 60px rgba(0, 0, 0, 0.15)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '20px',
+            pointerEvents: viewMode === 'hero' ? 'auto' : 'none',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontSize: '10px', color: isBgLight ? '#d97706' : '#f59e0b', fontWeight: 'bold', letterSpacing: '0.05em', marginBottom: '4px' }}>
+                LIVE KEYMAP OVERVIEW
+              </div>
+              <div style={{ fontSize: '16px', fontWeight: 'bold', color: textColor }}>
+                5 Physical Keys Mapping
+              </div>
+            </div>
+
+            <div
+              style={{
+                padding: '4px 10px',
+                borderRadius: '8px',
+                backgroundColor: isBgLight ? 'rgba(2, 132, 199, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                border: isBgLight ? '1px solid rgba(2, 132, 199, 0.3)' : '1px solid rgba(56, 189, 248, 0.3)',
+                color: isBgLight ? '#0284c7' : '#38bdf8',
+                fontSize: '11px',
+                fontWeight: 'bold',
+                maxWidth: '110px',
+                textOverflow: 'ellipsis',
+                overflow: 'hidden',
+                whiteSpace: 'nowrap',
+              }}
+              title={currentModeLabel}
+            >
+              {activeMode === 'modeA' ? 'Mode A' : 'Mode B'}: {currentModeLabel}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {currentKeymap.map((binding, idx) => (
+              <div
+                key={idx}
+                style={{
+                  padding: '10px 14px',
+                  borderRadius: '12px',
+                  backgroundColor: itemBg,
+                  border: `1px solid ${glassBorder}`,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span
+                    style={{
+                      width: '24px',
+                      height: '24px',
+                      borderRadius: '6px',
+                      backgroundColor: currentPalette.keycaps,
+                      color: '#fff',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '10px',
+                      fontWeight: 'bold',
+                    }}
+                  >
+                    K{idx + 1}
+                  </span>
+                  <span style={{ fontSize: '12px', color: subTextColor }}>Key {idx + 1}</span>
+                </div>
+                <span style={{ fontSize: '12px', fontWeight: 'bold', color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase' }}>
+                  {binding || 'Unassigned'}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <button
+            onClick={isConnected ? handleSaveToRP2040 : connectSerial}
+            style={{
+              padding: '12px',
+              borderRadius: '14px',
+              backgroundColor: isConnected ? '#10b981' : currentPalette.keycaps,
+              border: 'none',
+              color: '#ffffff',
+              fontWeight: 'bold',
+              fontSize: '12px',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+            }}
+          >
+            <span
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: isConnected ? '#34d399' : '#f87171',
+                boxShadow: isConnected ? '0 0 8px #34d399' : '0 0 8px #f87171',
+              }}
+            />
+            {isConnected ? 'Save Keymap to Hardware' : 'Disconnected: Click to Connect'}
+          </button>
+        </div>
+      </div>
+
+      {/* 4. CONFIGURATOR OVERLAY UI */}
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          zIndex: 4,
+          opacity: viewMode === 'config' ? 1 : 0,
+          pointerEvents: 'none',
+          transform: viewMode === 'config' ? 'translateY(0)' : 'translateY(30px)',
+          transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+        }}
+      >
+        {/* Top Navbar */}
+        <div
+          style={{
+            position: 'absolute',
+            top: '30px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 10,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            pointerEvents: viewMode === 'config' ? 'auto' : 'none',
+          }}
+        >
+          <button
+            onClick={() => {
+              setViewMode('hero');
+              setSelectedKeyName(null);
+            }}
+            style={{
+              padding: '10px 20px',
+              borderRadius: '12px',
+              border: `1px solid ${glassBorder}`,
+              backgroundColor: glassPanelBg,
+              color: textColor,
+              fontWeight: 'bold',
+              cursor: 'pointer',
+              fontSize: '12px',
+              backdropFilter: 'blur(12px)',
+            }}
+          >
+            ← Back to Overview
+          </button>
+
+          <button
+            onClick={connectSerial}
+            style={{
+              padding: '10px 20px',
+              borderRadius: '12px',
+              border: 'none',
+              backgroundColor: isConnected ? '#10b981' : currentPalette.keycaps,
+              color: '#fff',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+              fontSize: '12px',
+              backdropFilter: 'blur(12px)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <span
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                backgroundColor: isConnected ? '#ffffff' : '#f87171',
+              }}
+            />
+            {isConnected ? '✓ Hardware Connected' : '🔌 Connect RP2040'}
+          </button>
+
+          {isConnected && (
+            <button
+              onClick={handleSaveToRP2040}
+              style={{
+                padding: '10px 20px',
+                borderRadius: '12px',
+                border: 'none',
+                backgroundColor: '#f59e0b',
+                color: '#fff',
+                fontWeight: 'bold',
+                cursor: 'pointer',
+                fontSize: '12px',
+              }}
+            >
+              💾 Sync to Hardware
+            </button>
+          )}
+        </div>
+
+        {/* Left Control Panel */}
         <div
           style={{
             position: 'absolute',
             bottom: '40px',
             left: '40px',
-            backgroundColor: 'rgba(30, 41, 59, 0.85)',
-            backdropFilter: 'blur(12px)',
-            padding: '16px',
-            borderRadius: '16px',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            color: '#fff',
+            backgroundColor: glassPanelBg,
+            backdropFilter: 'blur(16px)',
+            padding: '20px',
+            borderRadius: '20px',
+            border: `1px solid ${glassBorder}`,
+            color: textColor,
             zIndex: 10,
-            minWidth: '220px',
+            minWidth: '250px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.15)',
+            pointerEvents: viewMode === 'config' ? 'auto' : 'none',
           }}
         >
-          <div style={{ display: 'flex', gap: '4px', marginBottom: '10px', background: '#0f172a', padding: '4px', borderRadius: '8px' }}>
-            <button
-              onClick={() => setActiveMode('modeA')}
-              style={{
-                flex: 1,
-                padding: '6px',
-                fontSize: '11px',
-                borderRadius: '6px',
-                border: 'none',
-                backgroundColor: activeMode === 'modeA' ? '#3b82f6' : 'transparent',
-                color: '#fff',
-                cursor: 'pointer',
-                fontWeight: 'bold',
-              }}
-            >
-              Mode A
-            </button>
-            <button
-              onClick={() => setActiveMode('modeB')}
-              style={{
-                flex: 1,
-                padding: '6px',
-                fontSize: '11px',
-                borderRadius: '6px',
-                border: 'none',
-                backgroundColor: activeMode === 'modeB' ? '#3b82f6' : 'transparent',
-                color: '#fff',
-                cursor: 'pointer',
-                fontWeight: 'bold',
-              }}
-            >
-              Mode B
-            </button>
-          </div>
-
-          <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '6px', color: '#f59e0b' }}>
-            Keymap:
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px' }}>
-            {[0, 1, 2, 3, 4].map((idx) => {
-              const keyName = `key_${idx + 1}`;
-              return (
-                <div
-                  key={keyName}
-                  onClick={() => setSelectedKeyName(keyName)}
+          {/* Theme Selector */}
+          <div>
+            <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '8px', color: isBgLight ? '#0284c7' : '#38bdf8' }}>
+              THEME PALETTE
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '6px', marginBottom: '8px' }}>
+              {PALETTES.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setIsCustomTheme(false);
+                    setCurrentPalette(p);
+                  }}
                   style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    padding: '4px 6px',
+                    padding: '6px 8px',
+                    fontSize: '10px',
                     borderRadius: '6px',
-                    backgroundColor: selectedKeyName === keyName ? 'rgba(245, 158, 11, 0.2)' : 'transparent',
-                    border: selectedKeyName === keyName ? '1px solid #f59e0b' : 'none',
+                    border: currentPalette.id === p.id && !isCustomTheme ? '1px solid #38bdf8' : `1px solid ${glassBorder}`,
+                    backgroundColor: currentPalette.id === p.id && !isCustomTheme ? 'rgba(56, 189, 248, 0.2)' : itemBg,
+                    color: textColor,
                     cursor: 'pointer',
+                    fontWeight: currentPalette.id === p.id && !isCustomTheme ? 'bold' : 'normal',
                   }}
                 >
-                  <span style={{ color: '#94a3b8' }}>{keyName}:</span>
-                  <span style={{ fontWeight: 'bold', color: '#f8fafc', textTransform: 'uppercase' }}>
-                    {activeMode === 'modeB' ? `CTRL + ${currentKeymap[idx]}` : currentKeymap[idx]}
-                  </span>
-                </div>
-              );
-            })}
+                  {p.name}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', background: itemBg, padding: '8px', borderRadius: '8px' }}>
+              <div style={{ fontSize: '10px', color: subTextColor, fontWeight: 'bold' }}>Custom Colors:</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '10px' }}>
+                <span>Background</span>
+                <input type="color" value={currentPalette.bg} onChange={(e) => handleCustomColorChange('bg', e.target.value)} style={{ border: 'none', width: '20px', height: '20px', cursor: 'pointer', background: 'none' }} />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '10px' }}>
+                <span>Case</span>
+                <input type="color" value={currentPalette.case} onChange={(e) => handleCustomColorChange('case', e.target.value)} style={{ border: 'none', width: '20px', height: '20px', cursor: 'pointer', background: 'none' }} />
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '10px' }}>
+                <span>Keycaps</span>
+                <input type="color" value={currentPalette.keycaps} onChange={(e) => handleCustomColorChange('keycaps', e.target.value)} style={{ border: 'none', width: '20px', height: '20px', cursor: 'pointer', background: 'none' }} />
+              </div>
+            </div>
+          </div>
+
+          <hr style={{ borderColor: glassBorder, margin: 0 }} />
+
+          {/* Mode Switcher */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '4px', background: itemBg, padding: '4px', borderRadius: '8px' }}>
+              <button
+                onClick={() => setActiveMode('modeA')}
+                style={{
+                  flex: 1,
+                  padding: '6px',
+                  fontSize: '11px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  backgroundColor: activeMode === 'modeA' ? '#2563eb' : 'transparent',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  fontWeight: 'bold',
+                }}
+              >
+                Mode A
+              </button>
+              <button
+                onClick={() => setActiveMode('modeB')}
+                style={{
+                  flex: 1,
+                  padding: '6px',
+                  fontSize: '11px',
+                  borderRadius: '6px',
+                  border: 'none',
+                  backgroundColor: activeMode === 'modeB' ? '#2563eb' : 'transparent',
+                  color: '#fff',
+                  cursor: 'pointer',
+                  fontWeight: 'bold',
+                }}
+              >
+                Mode B
+              </button>
+            </div>
+
+            <input
+              type="text"
+              value={activeMode === 'modeA' ? modeAName : modeBName}
+              onChange={(e) => {
+                if (activeMode === 'modeA') setModeAName(e.target.value);
+                else setModeBName(e.target.value);
+              }}
+              placeholder="Label Mode..."
+              style={{
+                width: '100%',
+                padding: '6px 10px',
+                fontSize: '11px',
+                borderRadius: '6px',
+                backgroundColor: itemBg,
+                border: `1px solid ${glassBorder}`,
+                color: isBgLight ? '#0284c7' : '#38bdf8',
+                fontWeight: 'bold',
+                boxSizing: 'border-box',
+                outline: 'none',
+              }}
+            />
+          </div>
+
+          {/* Quick Select Key */}
+          <div>
+            <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '6px', color: isBgLight ? '#d97706' : '#f59e0b' }}>
+              SELECT KEY TO EDIT:
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px' }}>
+              {[0, 1, 2, 3, 4].map((idx) => {
+                const keyName = `key_${idx + 1}`;
+                return (
+                  <div
+                    key={keyName}
+                    onClick={() => setSelectedKeyName(keyName)}
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      padding: '6px 8px',
+                      borderRadius: '6px',
+                      backgroundColor: selectedKeyName === keyName ? (isBgLight ? 'rgba(217, 119, 6, 0.15)' : 'rgba(245, 158, 11, 0.2)') : 'transparent',
+                      border: selectedKeyName === keyName ? '1px solid #f59e0b' : '1px solid transparent',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <span style={{ color: subTextColor }}>Key {idx + 1}:</span>
+                    <span style={{ fontWeight: 'bold', color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase' }}>
+                      {currentKeymap[idx] || 'empty'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
 
-        {/* Floating Panel: Clean Key Selection Box (Bottom Right) */}
+        {/* Right Mapping Panel */}
         {selectedKeyName && selectedKeyName.startsWith('key_') && (
           <div
             style={{
               position: 'absolute',
               bottom: '40px',
               right: '40px',
-              maxWidth: '340px',
-              backgroundColor: 'rgba(15, 23, 42, 0.95)',
-              backdropFilter: 'blur(12px)',
-              padding: '16px',
-              borderRadius: '16px',
-              border: '1px solid #3b82f6',
-              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5)',
-              color: '#fff',
+              width: '320px',
+              backgroundColor: glassPanelBg,
+              backdropFilter: 'blur(16px)',
+              padding: '20px',
+              borderRadius: '20px',
+              border: '1px solid #2563eb',
+              boxShadow: '0 20px 40px rgba(0,0,0,0.2)',
+              color: textColor,
               zIndex: 20,
+              pointerEvents: viewMode === 'config' ? 'auto' : 'none',
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-              <span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: 'bold' }}>
-                Select Keycode
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <span style={{ fontSize: '13px', color: textColor, fontWeight: 'bold' }}>
+                Map Key: {selectedKeyName.toUpperCase()}
               </span>
               <button
                 onClick={() => setSelectedKeyName(null)}
-                style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '14px' }}
+                style={{ background: 'none', border: 'none', color: subTextColor, cursor: 'pointer', fontSize: '14px' }}
               >
                 ✕
               </button>
             </div>
 
-            <div style={{ maxHeight: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {AVAILABLE_KEYCODES.map((group, idx) => (
-                <div key={idx}>
-                  <div style={{ fontSize: '10px', color: '#64748b', fontWeight: 'bold', marginBottom: '4px' }}>{group.group}</div>
+            {/* Modifiers Selection */}
+            <div style={{ marginBottom: '12px', background: itemBg, padding: '10px', borderRadius: '8px' }}>
+              <div style={{ fontSize: '10px', color: isBgLight ? '#0284c7' : '#38bdf8', fontWeight: 'bold', marginBottom: '6px' }}>
+                1. SELECT MODIFIERS:
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '6px' }}>
+                {MODIFIER_KEYS.map((mod) => {
+                  const active = selectedModifiers.includes(mod.id);
+                  return (
+                    <button
+                      key={mod.id}
+                      onClick={() => toggleModifier(mod.id)}
+                      style={{
+                        padding: '6px',
+                        fontSize: '10px',
+                        fontWeight: 'bold',
+                        borderRadius: '6px',
+                        border: active ? '1px solid #2563eb' : `1px solid ${glassBorder}`,
+                        backgroundColor: active ? '#2563eb' : 'transparent',
+                        color: active ? '#ffffff' : textColor,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {mod.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Keycode Selection */}
+            <div style={{ background: itemBg, padding: '10px', borderRadius: '8px', maxHeight: '220px', overflowY: 'auto' }}>
+              <div style={{ fontSize: '10px', color: isBgLight ? '#0284c7' : '#38bdf8', fontWeight: 'bold', marginBottom: '6px' }}>
+                2. SELECT KEYCODE:
+              </div>
+              {AVAILABLE_KEYCODES.map((group) => (
+                <div key={group.group} style={{ marginBottom: '10px' }}>
+                  <div style={{ fontSize: '9px', color: subTextColor, fontWeight: 'bold', marginBottom: '4px' }}>
+                    {group.group}
+                  </div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-                    {group.keys.map((kc) => {
-                      const keyIdx = parseInt(selectedKeyName.replace('key_', '')) - 1;
-                      const isSelected = currentKeymap[keyIdx] === kc;
-                      return (
-                        <button
-                          key={kc}
-                          onClick={() => handleAssignKeycode(kc)}
-                          style={{
-                            padding: '5px 8px',
-                            fontSize: '11px',
-                            borderRadius: '6px',
-                            border: isSelected ? '1px solid #3b82f6' : '1px solid #334155',
-                            backgroundColor: isSelected ? '#2563eb' : '#1e293b',
-                            color: '#fff',
-                            cursor: 'pointer',
-                            fontWeight: isSelected ? 'bold' : 'normal',
-                            textTransform: 'uppercase',
-                          }}
-                        >
-                          {kc}
-                        </button>
-                      );
-                    })}
+                    {group.keys.map((k) => (
+                      <button
+                        key={k}
+                        onClick={() => handleAssignKeycode(k)}
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: '10px',
+                          borderRadius: '4px',
+                          border: `1px solid ${glassBorder}`,
+                          backgroundColor: glassPanelBg,
+                          color: textColor,
+                          cursor: 'pointer',
+                          textTransform: 'uppercase',
+                        }}
+                      >
+                        {k}
+                      </button>
+                    ))}
                   </div>
                 </div>
               ))}
             </div>
           </div>
         )}
-      </section>
+      </div>
     </main>
   );
 }
