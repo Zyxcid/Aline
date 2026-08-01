@@ -4,6 +4,7 @@ import { useState, useEffect, Suspense, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, useGLTF, Stage } from '@react-three/drei';
 import * as THREE from 'three';
+import { Settings2, Plug, Save, Check, ArrowLeft, ChevronDown, X } from 'lucide-react';
 
 const MODIFIER_KEYS = [
   { id: 'ctrl', label: 'CTRL' },
@@ -14,7 +15,7 @@ const MODIFIER_KEYS = [
 
 const AVAILABLE_KEYCODES = [
   { 
-    group: 'Navigation & Special', 
+    group: 'Navigation & Special',
     keys: ['enter', 'backspace', 'space', 'tab', 'esc', 'delete', 'capslock', 'up', 'down', 'left', 'right'] 
   },
   { 
@@ -23,9 +24,12 @@ const AVAILABLE_KEYCODES = [
   },
   { 
     group: 'Numbers & Symbols', 
-    keys: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f12'] 
+    keys: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12'] 
   },
 ];
+
+// Harus sama persis dengan MAX_COMBOS di firmware (macropad_firmware.ino)
+const MAX_COMBOS = 8;
 
 type ColorPalette = {
   id: string;
@@ -43,6 +47,12 @@ const PALETTES: ColorPalette[] = [
 ];
 
 type ModeKeymap = string[];
+
+export interface ComboRule {
+  keys: number[]; // Index tombol: [0, 1] berarti Key 1 & Key 2
+  modeA: string;
+  modeB: string;
+}
 
 // Helper untuk mendeteksi apakah warna HEX tergolong terang
 function isLightColor(hex: string): boolean {
@@ -139,6 +149,11 @@ export default function Home() {
   const [modeA, setModeA] = useState<ModeKeymap>(['s', 'ctrl+a', 'ctrl+shift+w', 'd', 'r']);
   const [modeB, setModeB] = useState<ModeKeymap>(['z', 'x', 'c', 'v', 'y']);
 
+  // STATE COMBO RULES
+  const [combos, setCombos] = useState<ComboRule[]>([
+    { keys: [0, 1], modeA: 'q', modeB: 'ctrl+q' }
+  ]);
+
   // Deteksi status kontras warna berdasarkan warna latar saat ini
   const isBgLight = isLightColor(currentPalette.bg);
   const textColor = isBgLight ? '#0f172a' : '#ffffff';
@@ -170,6 +185,7 @@ export default function Home() {
     };
   }, [viewMode]);
 
+  // Load LocalStorage
   useEffect(() => {
     try {
       const savedConfig = localStorage.getItem('aline_config');
@@ -177,6 +193,7 @@ export default function Home() {
         const parsed = JSON.parse(savedConfig);
         if (parsed.modeA) setModeA(parsed.modeA);
         if (parsed.modeB) setModeB(parsed.modeB);
+        if (parsed.combos) setCombos(parsed.combos);
         if (parsed.modeAName) setModeAName(parsed.modeAName);
         if (parsed.modeBName) setModeBName(parsed.modeBName);
         if (parsed.palette) setCurrentPalette(parsed.palette);
@@ -187,11 +204,13 @@ export default function Home() {
     }
   }, []);
 
+  // Save LocalStorage
   useEffect(() => {
     try {
       const dataToSave = {
         modeA,
         modeB,
+        combos,
         modeAName,
         modeBName,
         palette: currentPalette,
@@ -201,7 +220,7 @@ export default function Home() {
     } catch (e) {
       console.error('Failed to save LocalStorage:', e);
     }
-  }, [modeA, modeB, modeAName, modeBName, currentPalette, isCustomTheme]);
+  }, [modeA, modeB, combos, modeAName, modeBName, currentPalette, isCustomTheme]);
 
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
 
@@ -215,9 +234,18 @@ export default function Home() {
     }
   }, [selectedKeyName, activeMode, modeA, modeB]);
 
+  // WEB SERIAL MANAGEMENT
   const [isConnected, setIsConnected] = useState(false);
   const portRef = useRef<any>(null);
   const readerRef = useRef<any>(null);
+
+  // Status balasan dari firmware saat SET_KEYMAP (success / warning / error)
+  const [syncStatus, setSyncStatus] = useState<{ level: string; message: string } | null>(null);
+  useEffect(() => {
+    if (!syncStatus) return;
+    const t = setTimeout(() => setSyncStatus(null), 4000);
+    return () => clearTimeout(t);
+  }, [syncStatus]);
 
   const connectSerial = async () => {
     if (!('serial' in navigator)) {
@@ -271,6 +299,10 @@ export default function Home() {
             if (data.type === 'KEYMAP_RESPONSE') {
               if (data.modeA) setModeA(data.modeA);
               if (data.modeB) setModeB(data.modeB);
+              if (data.combos) setCombos(data.combos);
+            } else if (data.status) {
+              // Firmware mengirim baris terpisah seperti {"status":"warning","message":"..."}
+              setSyncStatus({ level: data.status, message: data.message || '' });
             }
           } catch (e) {
             console.log('Raw Serial Response:', line);
@@ -285,7 +317,38 @@ export default function Home() {
   };
 
   const handleSaveToRP2040 = () => {
-    sendSerialMessage({ type: 'SET_KEYMAP', modeA, modeB });
+    sendSerialMessage({ type: 'SET_KEYMAP', modeA, modeB, combos });
+  };
+
+  // HANDLERS COMBO
+  const addComboRule = () => {
+    if (combos.length >= MAX_COMBOS) return; // firmware cuma menyimpan sampai MAX_COMBOS
+    setCombos([...combos, { keys: [0, 1], modeA: 'q', modeB: 'ctrl+q' }]);
+  };
+
+  const removeComboRule = (index: number) => {
+    setCombos(combos.filter((_, i) => i !== index));
+  };
+
+  const toggleComboKey = (comboIndex: number, keyIndex: number) => {
+    const updated = [...combos];
+    const currentKeys = updated[comboIndex].keys;
+
+    if (currentKeys.includes(keyIndex)) {
+      if (currentKeys.length > 2) {
+        updated[comboIndex].keys = currentKeys.filter((k) => k !== keyIndex);
+      }
+    } else {
+      updated[comboIndex].keys = [...currentKeys, keyIndex].sort();
+    }
+    setCombos(updated);
+  };
+
+  const handleComboOutputChange = (comboIndex: number, mode: 'modeA' | 'modeB', value: string) => {
+    const updated = [...combos];
+    if (mode === 'modeA') updated[comboIndex].modeA = value;
+    else updated[comboIndex].modeB = value;
+    setCombos(updated);
   };
 
   const toggleModifier = (modId: string) => {
@@ -296,21 +359,29 @@ export default function Home() {
     }
   };
 
-  const handleAssignKeycode = (primaryKey: string) => {
+  const assignBinding = (binding: string) => {
     if (!selectedKeyName || !selectedKeyName.startsWith('key_')) return;
-
     const keyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
-    const fullBinding = [...selectedModifiers, primaryKey.toLowerCase()].join('+');
 
     if (activeMode === 'modeA') {
       const updated = [...modeA];
-      updated[keyIndex] = fullBinding;
+      updated[keyIndex] = binding;
       setModeA(updated);
     } else {
       const updated = [...modeB];
-      updated[keyIndex] = fullBinding;
+      updated[keyIndex] = binding;
       setModeB(updated);
     }
+  };
+
+  const handleAssignKeycode = (primaryKey: string) => {
+    assignBinding([...selectedModifiers, primaryKey.toLowerCase()].join('+'));
+  };
+
+  // Pasang modifier itu sendiri sebagai binding (mis. hanya "alt", tanpa tombol lain)
+  const handleAssignModifierOnly = () => {
+    if (selectedModifiers.length === 0) return;
+    assignBinding(selectedModifiers.join('+'));
   };
 
   const handleCustomColorChange = (key: 'bg' | 'case' | 'keycaps', colorValue: string) => {
@@ -331,7 +402,7 @@ export default function Home() {
       style={{
         backgroundColor: currentPalette.bg,
         color: textColor,
-        fontFamily: 'sans-serif',
+        fontFamily: "'Manrope', system-ui, sans-serif",
         height: '100vh',
         width: '100vw',
         overflow: 'hidden',
@@ -339,6 +410,17 @@ export default function Home() {
         transition: 'background-color 0.5s ease, color 0.5s ease',
       }}
     >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700;800&family=Manrope:wght@400;500;700;800&family=JetBrains+Mono:wght@500;700&display=swap');
+        * { box-sizing: border-box; }
+        button:focus-visible, input:focus-visible {
+          outline: 2px solid #38bdf8;
+          outline-offset: 2px;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          * { animation: none !important; transition: none !important; }
+        }
+      `}</style>
       {/* 1. PERSISTENT 3D CANVAS LAYER */}
       <div
         style={{
@@ -407,11 +489,11 @@ export default function Home() {
       >
         {/* Left Hero Text */}
         <div style={{ maxWidth: '520px', display: 'flex', flexDirection: 'column', gap: '24px', pointerEvents: viewMode === 'hero' ? 'auto' : 'none' }}>
-          {/* Judul dengan kontras dinamis bebas kotak hitam */}
           <h1
             style={{
+              fontFamily: "'Space Grotesk', 'Manrope', sans-serif",
               fontSize: '4rem',
-              fontWeight: '900',
+              fontWeight: '700',
               lineHeight: '1.05',
               letterSpacing: '-0.03em',
               margin: 0,
@@ -442,7 +524,7 @@ export default function Home() {
                 transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
                 display: 'inline-flex',
                 alignItems: 'center',
-                gap: '12px',
+                gap: '10px',
                 letterSpacing: '0.02em',
               }}
               onMouseEnter={(e) => {
@@ -453,7 +535,7 @@ export default function Home() {
               }}
             >
               <span>Start Customizing</span>
-              <span style={{ fontSize: '1.2rem' }}>⚙️</span>
+              <Settings2 size={18} strokeWidth={2.5} />
             </button>
 
             <div
@@ -461,7 +543,7 @@ export default function Home() {
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: '8px',
+                gap: '6px',
                 color: subTextColor,
                 fontSize: '12px',
                 fontWeight: '600',
@@ -469,7 +551,8 @@ export default function Home() {
                 userSelect: 'none',
               }}
             >
-              <span>↓ Scroll down or click to customize</span>
+              <ChevronDown size={14} />
+              <span>Scroll down or click to customize</span>
             </div>
           </div>
         </div>
@@ -537,7 +620,7 @@ export default function Home() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <span
                     style={{
-                      width: '24px',
+                      width: '26px',
                       height: '24px',
                       borderRadius: '6px',
                       backgroundColor: currentPalette.keycaps,
@@ -546,14 +629,16 @@ export default function Home() {
                       alignItems: 'center',
                       justifyContent: 'center',
                       fontSize: '10px',
-                      fontWeight: 'bold',
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontWeight: '700',
+                      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.35), inset 0 -2px 0 rgba(0,0,0,0.2)',
                     }}
                   >
                     K{idx + 1}
                   </span>
                   <span style={{ fontSize: '12px', color: subTextColor }}>Key {idx + 1}</span>
                 </div>
-                <span style={{ fontSize: '12px', fontWeight: 'bold', color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase' }}>
+                <span style={{ fontSize: '12px', fontWeight: '700', fontFamily: "'JetBrains Mono', monospace", color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase', letterSpacing: '0.02em' }}>
                   {binding || 'Unassigned'}
                 </span>
               </div>
@@ -603,6 +688,31 @@ export default function Home() {
           transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
         }}
       >
+        {/* Sync Status Banner (dari respons SET_KEYMAP firmware) */}
+        {syncStatus && (
+          <div
+            style={{
+              position: 'absolute',
+              top: '30px',
+              left: '50%',
+              transform: 'translateX(-50%) translateY(56px)',
+              zIndex: 15,
+              padding: '8px 16px',
+              borderRadius: '10px',
+              fontSize: '11px',
+              fontWeight: 'bold',
+              color: '#fff',
+              backgroundColor:
+                syncStatus.level === 'success' ? '#10b981' :
+                syncStatus.level === 'warning' ? '#f59e0b' : '#ef4444',
+              boxShadow: '0 8px 20px rgba(0,0,0,0.25)',
+              pointerEvents: 'none',
+            }}
+          >
+            {syncStatus.message || syncStatus.level}
+          </div>
+        )}
+
         {/* Top Navbar */}
         <div
           style={{
@@ -632,9 +742,16 @@ export default function Home() {
               cursor: 'pointer',
               fontSize: '12px',
               backdropFilter: 'blur(12px)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              transition: 'transform 0.2s ease',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
           >
-            ← Back to Overview
+            <ArrowLeft size={14} />
+            Back to Overview
           </button>
 
           <button
@@ -651,8 +768,11 @@ export default function Home() {
               backdropFilter: 'blur(12px)',
               display: 'flex',
               alignItems: 'center',
-              gap: '6px',
+              gap: '8px',
+              transition: 'transform 0.2s ease',
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
           >
             <span
               style={{
@@ -660,9 +780,11 @@ export default function Home() {
                 height: '8px',
                 borderRadius: '50%',
                 backgroundColor: isConnected ? '#ffffff' : '#f87171',
+                boxShadow: isConnected ? '0 0 6px #ffffff' : '0 0 6px #f87171',
               }}
             />
-            {isConnected ? '✓ Hardware Connected' : '🔌 Connect RP2040'}
+            {isConnected ? <Check size={14} /> : <Plug size={14} />}
+            {isConnected ? 'Hardware Connected' : 'Connect RP2040'}
           </button>
 
           {isConnected && (
@@ -677,9 +799,16 @@ export default function Home() {
                 fontWeight: 'bold',
                 cursor: 'pointer',
                 fontSize: '12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                transition: 'transform 0.2s ease',
               }}
+              onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
             >
-              💾 Sync to Hardware
+              <Save size={14} />
+              Sync to Hardware
             </button>
           )}
         </div>
@@ -688,6 +817,7 @@ export default function Home() {
         <div
           style={{
             position: 'absolute',
+            top: '90px',
             bottom: '40px',
             left: '40px',
             backgroundColor: glassPanelBg,
@@ -697,11 +827,12 @@ export default function Home() {
             border: `1px solid ${glassBorder}`,
             color: textColor,
             zIndex: 10,
-            minWidth: '250px',
+            width: '280px',
             display: 'flex',
             flexDirection: 'column',
             gap: '14px',
             boxShadow: '0 20px 40px rgba(0,0,0,0.15)',
+            overflowY: 'auto',
             pointerEvents: viewMode === 'config' ? 'auto' : 'none',
           }}
         >
@@ -833,16 +964,126 @@ export default function Home() {
                       backgroundColor: selectedKeyName === keyName ? (isBgLight ? 'rgba(217, 119, 6, 0.15)' : 'rgba(245, 158, 11, 0.2)') : 'transparent',
                       border: selectedKeyName === keyName ? '1px solid #f59e0b' : '1px solid transparent',
                       cursor: 'pointer',
+                      transition: 'background-color 0.15s ease',
                     }}
                   >
                     <span style={{ color: subTextColor }}>Key {idx + 1}:</span>
-                    <span style={{ fontWeight: 'bold', color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase' }}>
+                    <span style={{ fontWeight: '700', fontFamily: "'JetBrains Mono', monospace", color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase' }}>
                       {currentKeymap[idx] || 'empty'}
                     </span>
                   </div>
                 );
               })}
             </div>
+          </div>
+
+          <hr style={{ borderColor: glassBorder, margin: 0 }} />
+
+          {/* MODUL COMBO RULES (CHORDING) */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '11px', fontWeight: 'bold', color: isBgLight ? '#10b981' : '#34d399' }}>
+                COMBO RULES ({combos.length}/{MAX_COMBOS})
+              </span>
+              <button
+                onClick={addComboRule}
+                disabled={combos.length >= MAX_COMBOS}
+                title={combos.length >= MAX_COMBOS ? `Maksimal ${MAX_COMBOS} combo (batas firmware)` : undefined}
+                style={{
+                  padding: '3px 8px',
+                  fontSize: '10px',
+                  borderRadius: '4px',
+                  border: 'none',
+                  backgroundColor: combos.length >= MAX_COMBOS ? '#6b7280' : '#10b981',
+                  color: '#fff',
+                  fontWeight: 'bold',
+                  cursor: combos.length >= MAX_COMBOS ? 'not-allowed' : 'pointer',
+                  opacity: combos.length >= MAX_COMBOS ? 0.6 : 1,
+                }}
+              >
+                + Add Combo
+              </button>
+            </div>
+
+            {combos.length === 0 ? (
+              <div style={{ fontSize: '10px', color: subTextColor, fontStyle: 'italic' }}>
+                Belum ada combo yang dikonfigurasi.
+              </div>
+            ) : (
+              combos.map((c, cIdx) => (
+                <div
+                  key={cIdx}
+                  style={{
+                    padding: '8px',
+                    borderRadius: '8px',
+                    backgroundColor: itemBg,
+                    border: `1px solid ${glassBorder}`,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '10px', fontWeight: 'bold', color: textColor }}>
+                      Combo #{cIdx + 1}
+                    </span>
+                    <button
+                      onClick={() => removeComboRule(cIdx)}
+                      style={{ background: 'none', border: 'none', color: '#f87171', fontSize: '10px', cursor: 'pointer', fontWeight: 'bold' }}
+                    >
+                      Hapus
+                    </button>
+                  </div>
+
+                  <div style={{ fontSize: '9px', color: subTextColor }}>Trigger Keys:</div>
+                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                    {[0, 1, 2, 3, 4].map((kIdx) => (
+                      <label key={kIdx} style={{ fontSize: '9px', display: 'flex', alignItems: 'center', gap: '2px', cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={c.keys.includes(kIdx)}
+                          onChange={() => toggleComboKey(cIdx, kIdx)}
+                        />
+                        K{kIdx + 1}
+                      </label>
+                    ))}
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', marginTop: '4px' }}>
+                    <input
+                      type="text"
+                      placeholder="Out A"
+                      value={c.modeA}
+                      onChange={(e) => handleComboOutputChange(cIdx, 'modeA', e.target.value)}
+                      style={{
+                        padding: '4px',
+                        fontSize: '9px',
+                        borderRadius: '4px',
+                        border: `1px solid ${glassBorder}`,
+                        backgroundColor: glassPanelBg,
+                        color: textColor,
+                        outline: 'none',
+                      }}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Out B"
+                      value={c.modeB}
+                      onChange={(e) => handleComboOutputChange(cIdx, 'modeB', e.target.value)}
+                      style={{
+                        padding: '4px',
+                        fontSize: '9px',
+                        borderRadius: '4px',
+                        border: `1px solid ${glassBorder}`,
+                        backgroundColor: glassPanelBg,
+                        color: textColor,
+                        outline: 'none',
+                      }}
+                    />
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
 
@@ -866,21 +1107,21 @@ export default function Home() {
             }}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <span style={{ fontSize: '13px', color: textColor, fontWeight: 'bold' }}>
+              <span style={{ fontSize: '13px', color: textColor, fontWeight: '700', fontFamily: "'JetBrains Mono', monospace" }}>
                 Map Key: {selectedKeyName.toUpperCase()}
               </span>
               <button
                 onClick={() => setSelectedKeyName(null)}
-                style={{ background: 'none', border: 'none', color: subTextColor, cursor: 'pointer', fontSize: '14px' }}
+                style={{ background: 'none', border: 'none', color: subTextColor, cursor: 'pointer', display: 'flex', padding: '4px' }}
               >
-                ✕
+                <X size={16} />
               </button>
             </div>
 
             {/* Modifiers Selection */}
             <div style={{ marginBottom: '12px', background: itemBg, padding: '10px', borderRadius: '8px' }}>
               <div style={{ fontSize: '10px', color: isBgLight ? '#0284c7' : '#38bdf8', fontWeight: 'bold', marginBottom: '6px' }}>
-                1. SELECT MODIFIERS:
+                1. PILIH MODIFIER (opsional, bisa berdiri sendiri):
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '6px' }}>
                 {MODIFIER_KEYS.map((mod) => {
@@ -905,12 +1146,39 @@ export default function Home() {
                   );
                 })}
               </div>
+
+              {selectedModifiers.length > 0 && (
+                <button
+                  onClick={handleAssignModifierOnly}
+                  style={{
+                    marginTop: '8px',
+                    width: '100%',
+                    padding: '8px',
+                    fontSize: '10px',
+                    fontWeight: 'bold',
+                    borderRadius: '6px',
+                    border: '1px dashed #2563eb',
+                    backgroundColor: 'transparent',
+                    color: isBgLight ? '#1d4ed8' : '#60a5fa',
+                    cursor: 'pointer',
+                    letterSpacing: '0.02em',
+                  }}
+                >
+                  Pasang {selectedModifiers.map((m) => m.toUpperCase()).join('+')} saja (tanpa keycode)
+                </button>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '2px 0 10px' }}>
+              <div style={{ flex: 1, height: '1px', backgroundColor: glassBorder }} />
+              <span style={{ fontSize: '9px', color: subTextColor, fontWeight: 'bold' }}>ATAU</span>
+              <div style={{ flex: 1, height: '1px', backgroundColor: glassBorder }} />
             </div>
 
             {/* Keycode Selection */}
             <div style={{ background: itemBg, padding: '10px', borderRadius: '8px', maxHeight: '220px', overflowY: 'auto' }}>
               <div style={{ fontSize: '10px', color: isBgLight ? '#0284c7' : '#38bdf8', fontWeight: 'bold', marginBottom: '6px' }}>
-                2. SELECT KEYCODE:
+                2. ATAU PILIH KEYCODE:
               </div>
               {AVAILABLE_KEYCODES.map((group) => (
                 <div key={group.group} style={{ marginBottom: '10px' }}>
@@ -925,13 +1193,20 @@ export default function Home() {
                         style={{
                           padding: '4px 8px',
                           fontSize: '10px',
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontWeight: '600',
                           borderRadius: '4px',
                           border: `1px solid ${glassBorder}`,
                           backgroundColor: glassPanelBg,
                           color: textColor,
                           cursor: 'pointer',
                           textTransform: 'uppercase',
+                          transition: 'transform 0.1s ease, background-color 0.15s ease',
                         }}
+                        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = '#2563eb'; e.currentTarget.style.color = '#fff'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = glassPanelBg; e.currentTarget.style.color = textColor; }}
+                        onMouseDown={(e) => { e.currentTarget.style.transform = 'translateY(1px)'; }}
+                        onMouseUp={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
                       >
                         {k}
                       </button>
