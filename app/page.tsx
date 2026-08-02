@@ -4,7 +4,7 @@ import { useState, useEffect, Suspense, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, useGLTF, Stage } from '@react-three/drei';
 import * as THREE from 'three';
-import { Settings2, Plug, Save, Check, ArrowLeft, ChevronDown, X } from 'lucide-react';
+import { Settings2, Plug, Save, Check, ArrowLeft, ChevronDown, X, SquareTerminal } from 'lucide-react';
 
 const MODIFIER_KEYS = [
   { id: 'ctrl', label: 'CTRL' },
@@ -15,7 +15,7 @@ const MODIFIER_KEYS = [
 
 const AVAILABLE_KEYCODES = [
   { 
-    group: 'Navigation & Special',
+    group: 'Navigation & Special', 
     keys: ['enter', 'backspace', 'space', 'tab', 'esc', 'delete', 'capslock', 'up', 'down', 'left', 'right'] 
   },
   { 
@@ -29,7 +29,8 @@ const AVAILABLE_KEYCODES = [
 ];
 
 // Harus sama persis dengan MAX_COMBOS di firmware (macropad_firmware.ino)
-const MAX_COMBOS = 8;
+// 26 = jumlah kombinasi unik maksimal yang mungkin dari 5 tombol (kombinasi 2-5 tombol sekaligus)
+const MAX_COMBOS = 26;
 
 type ColorPalette = {
   id: string;
@@ -146,13 +147,22 @@ export default function Home() {
   const [modeAName, setModeAName] = useState('Default Work');
   const [modeBName, setModeBName] = useState('Gaming / Secondary');
 
-  const [modeA, setModeA] = useState<ModeKeymap>(['s', 'ctrl+a', 'ctrl+shift+w', 'd', 'r']);
-  const [modeB, setModeB] = useState<ModeKeymap>(['z', 'x', 'c', 'v', 'y']);
+  const [modeA, setModeA] = useState<ModeKeymap>(['s', 'a', 'w', 'd', 'r']);
+  const [modeB, setModeB] = useState<ModeKeymap>(['tab', 'ctrl', 'alt', 't', 'w']);
 
   // STATE COMBO RULES
   const [combos, setCombos] = useState<ComboRule[]>([
     { keys: [0, 1], modeA: 'q', modeB: 'ctrl+q' }
   ]);
+
+  // Jendela deteksi combo (ms) — harus sinkron dengan CHORD_WINDOW_MIN_MS/MAX_MS di firmware
+  const CHORD_WINDOW_MIN = 15;
+  const CHORD_WINDOW_MAX = 150;
+  const [chordWindowMs, setChordWindowMs] = useState(35);
+
+  // Combo list ditampilkan collapsed (ringkasan 1 baris) supaya gampang dipindai
+  // begitu jumlah combo mulai banyak. Cuma 1 yang boleh terbuka sekaligus (accordion).
+  const [expandedComboIndex, setExpandedComboIndex] = useState<number | null>(null);
 
   // Deteksi status kontras warna berdasarkan warna latar saat ini
   const isBgLight = isLightColor(currentPalette.bg);
@@ -194,6 +204,7 @@ export default function Home() {
         if (parsed.modeA) setModeA(parsed.modeA);
         if (parsed.modeB) setModeB(parsed.modeB);
         if (parsed.combos) setCombos(parsed.combos);
+        if (typeof parsed.chordWindowMs === 'number') setChordWindowMs(parsed.chordWindowMs);
         if (parsed.modeAName) setModeAName(parsed.modeAName);
         if (parsed.modeBName) setModeBName(parsed.modeBName);
         if (parsed.palette) setCurrentPalette(parsed.palette);
@@ -211,6 +222,7 @@ export default function Home() {
         modeA,
         modeB,
         combos,
+        chordWindowMs,
         modeAName,
         modeBName,
         palette: currentPalette,
@@ -220,9 +232,11 @@ export default function Home() {
     } catch (e) {
       console.error('Failed to save LocalStorage:', e);
     }
-  }, [modeA, modeB, combos, modeAName, modeBName, currentPalette, isCustomTheme]);
+  }, [modeA, modeB, combos, chordWindowMs, modeAName, modeBName, currentPalette, isCustomTheme]);
 
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
+  // Saat mengedit binding sebuah combo (bukan tombol fisik), simpan target di sini
+  const [comboEditTarget, setComboEditTarget] = useState<{ index: number; field: 'modeA' | 'modeB' } | null>(null);
 
   useEffect(() => {
     if (selectedKeyName && selectedKeyName.startsWith('key_')) {
@@ -231,13 +245,53 @@ export default function Home() {
       const parts = (currentBinding || '').split('+');
       const existingMods = parts.slice(0, parts.length - 1);
       setSelectedModifiers(existingMods);
+    } else if (comboEditTarget) {
+      const currentBinding = combos[comboEditTarget.index]?.[comboEditTarget.field] || '';
+      const parts = currentBinding.split('+');
+      const existingMods = parts.slice(0, parts.length - 1);
+      setSelectedModifiers(existingMods);
     }
-  }, [selectedKeyName, activeMode, modeA, modeB]);
+  }, [selectedKeyName, comboEditTarget, activeMode, modeA, modeB, combos]);
 
   // WEB SERIAL MANAGEMENT
   const [isConnected, setIsConnected] = useState(false);
   const portRef = useRef<any>(null);
   const readerRef = useRef<any>(null);
+
+  // --- TEST INPUT (uji keystroke fisik langsung di halaman config) ---
+  // Sengaja TIDAK disimpan ke localStorage / disinkron ke hardware — murni tampilan sementara.
+  const TEST_INPUT_IDLE_MS = 2500;   // jeda tanpa input sebelum mulai fade
+  const TEST_INPUT_FADE_MS = 900;    // durasi animasi fade-out
+  const [testInputValue, setTestInputValue] = useState('');
+  const [testInputFading, setTestInputFading] = useState(false);
+  const testIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const testFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTestTimers = () => {
+    if (testIdleTimerRef.current) clearTimeout(testIdleTimerRef.current);
+    if (testFadeTimerRef.current) clearTimeout(testFadeTimerRef.current);
+    testIdleTimerRef.current = null;
+    testFadeTimerRef.current = null;
+  };
+
+  const handleTestInputChange = (value: string) => {
+    clearTestTimers();
+    setTestInputFading(false);
+    setTestInputValue(value);
+
+    if (value.length === 0) return;
+
+    testIdleTimerRef.current = setTimeout(() => {
+      setTestInputFading(true);
+      testFadeTimerRef.current = setTimeout(() => {
+        setTestInputValue('');
+        setTestInputFading(false);
+      }, TEST_INPUT_FADE_MS);
+    }, TEST_INPUT_IDLE_MS);
+  };
+
+  // Bersihkan timer kalau komponen unmount, supaya tidak ada setState setelah unmount
+  useEffect(() => clearTestTimers, []);
 
   // Status balasan dari firmware saat SET_KEYMAP (success / warning / error)
   const [syncStatus, setSyncStatus] = useState<{ level: string; message: string } | null>(null);
@@ -247,9 +301,45 @@ export default function Home() {
     return () => clearTimeout(t);
   }, [syncStatus]);
 
+  // --- AUTO-SYNC (debounced) ---
+  // Dipicu tiap kali modeA/modeB/combos/chordWindowMs berubah, tapi TIDAK langsung
+  // commit ke EEPROM. Menunggu jeda AUTO_SYNC_DEBOUNCE_MS tanpa perubahan lagi dulu,
+  // baru kirim satu kali. Ini penting supaya menggeser slider atau color picker
+  // (yang menembak banyak onChange sekaligus) tidak menghabiskan siklus erase/write
+  // flash EEPROM berkali-kali dalam hitungan detik.
+  const AUTO_SYNC_DEBOUNCE_MS = 3000; // dinaikkan dari 1200ms supaya tidak buru-buru saat masih ngatur beberapa combo
+  const autoSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const skipNextAutoSyncRef = useRef(false); // true saat perubahan state berasal dari KEYMAP_RESPONSE, bukan dari user
+  const [autoSyncPending, setAutoSyncPending] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (skipNextAutoSyncRef.current) {
+      // Perubahan ini datang dari firmware (GET_KEYMAP response), bukan dari
+      // editan user -> jangan kirim balik, itu akan jadi sync yang sia-sia.
+      skipNextAutoSyncRef.current = false;
+      return;
+    }
+    if (!isConnected) return;
+
+    setAutoSyncPending((prev) => (prev ? prev : true)); // hindari re-render sia-sia saat drag slider terus menembak onChange
+    const t = setTimeout(() => {
+      handleSaveToRP2040();
+    }, AUTO_SYNC_DEBOUNCE_MS);
+    autoSyncTimerRef.current = t;
+
+    return () => clearTimeout(t);
+    // isConnected sengaja TIDAK dimasukkan sebagai dependency: begitu baru connect,
+    // GET_KEYMAP response akan mengubah modeA/modeB/combos lewat skipNextAutoSyncRef
+    // di atas, jadi effect ini tidak boleh ikut jalan hanya karena isConnected berubah
+    // (kalau ikut, bisa menimpa keymap asli di hardware dengan state lokal yang lama
+    // sebelum GET_KEYMAP sempat balas).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modeA, modeB, combos, chordWindowMs]);
+
   const connectSerial = async () => {
     if (!('serial' in navigator)) {
-      alert('Browser Anda belum mendukung Web Serial API.');
+      alert('Your browser does not support the Web Serial API.');
       return;
     }
 
@@ -297,9 +387,14 @@ export default function Home() {
           try {
             const data = JSON.parse(line.trim());
             if (data.type === 'KEYMAP_RESPONSE') {
+              // Ini data DARI firmware (baik saat GET_KEYMAP maupun echo setelah SET_KEYMAP
+              // berhasil) -> jangan kirim balik lewat auto-sync, atau akan jadi loop tanpa
+              // henti (kirim -> firmware balas -> dianggap "berubah" -> kirim lagi -> ...).
+              skipNextAutoSyncRef.current = true;
               if (data.modeA) setModeA(data.modeA);
               if (data.modeB) setModeB(data.modeB);
               if (data.combos) setCombos(data.combos);
+              if (typeof data.chordWindowMs === 'number') setChordWindowMs(data.chordWindowMs);
             } else if (data.status) {
               // Firmware mengirim baris terpisah seperti {"status":"warning","message":"..."}
               setSyncStatus({ level: data.status, message: data.message || '' });
@@ -317,17 +412,25 @@ export default function Home() {
   };
 
   const handleSaveToRP2040 = () => {
-    sendSerialMessage({ type: 'SET_KEYMAP', modeA, modeB, combos });
+    if (autoSyncTimerRef.current) {
+      clearTimeout(autoSyncTimerRef.current);
+      autoSyncTimerRef.current = null;
+    }
+    sendSerialMessage({ type: 'SET_KEYMAP', modeA, modeB, combos, chordWindowMs });
+    setLastSyncedAt(Date.now());
+    setAutoSyncPending(false);
   };
 
   // HANDLERS COMBO
   const addComboRule = () => {
     if (combos.length >= MAX_COMBOS) return; // firmware cuma menyimpan sampai MAX_COMBOS
     setCombos([...combos, { keys: [0, 1], modeA: 'q', modeB: 'ctrl+q' }]);
+    setExpandedComboIndex(combos.length); // langsung buka combo baru ini untuk diedit
   };
 
   const removeComboRule = (index: number) => {
     setCombos(combos.filter((_, i) => i !== index));
+    setExpandedComboIndex(null); // hindari nyangkut di index yang sudah bergeser
   };
 
   const toggleComboKey = (comboIndex: number, keyIndex: number) => {
@@ -360,6 +463,11 @@ export default function Home() {
   };
 
   const assignBinding = (binding: string) => {
+    if (comboEditTarget) {
+      handleComboOutputChange(comboEditTarget.index, comboEditTarget.field, binding);
+      return;
+    }
+
     if (!selectedKeyName || !selectedKeyName.startsWith('key_')) return;
     const keyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
 
@@ -417,6 +525,10 @@ export default function Home() {
           outline: 2px solid #38bdf8;
           outline-offset: 2px;
         }
+        @keyframes pulseDot {
+          0%, 100% { transform: scale(1); opacity: 1; }
+          50% { transform: scale(1.4); opacity: 0.6; }
+        }
         @media (prefers-reduced-motion: reduce) {
           * { animation: none !important; transition: none !important; }
         }
@@ -440,6 +552,7 @@ export default function Home() {
                 selectedKey={selectedKeyName}
                 isInteractive={viewMode === 'config'}
                 onSelectKey={(keyName) => {
+                  setComboEditTarget(null);
                   setSelectedKeyName(keyName);
                 }}
               />
@@ -713,6 +826,42 @@ export default function Home() {
           </div>
         )}
 
+        {/* Live Test — pill kecil di kanan atas, sengaja minim teks */}
+        <div
+          style={{
+            position: 'absolute',
+            top: '30px',
+            right: '40px',
+            zIndex: 10,
+            pointerEvents: viewMode === 'config' ? 'auto' : 'none',
+          }}
+        >
+          <input
+            type="text"
+            value={testInputValue}
+            onChange={(e) => handleTestInputChange(e.target.value)}
+            placeholder="Type here..."
+            style={{
+              width: '160px',
+              padding: '9px 14px',
+              fontSize: '11px',
+              fontFamily: "'JetBrains Mono', monospace",
+              borderRadius: '999px',
+              border: testInputValue ? '1px solid rgba(16, 185, 129, 0.6)' : `1px solid ${glassBorder}`,
+              backgroundColor: glassPanelBg,
+              backdropFilter: 'blur(12px)',
+              color: textColor,
+              outline: 'none',
+              textAlign: 'center',
+              opacity: testInputFading ? 0 : 1,
+              boxShadow: testInputValue ? '0 0 0 3px rgba(16, 185, 129, 0.12), 0 8px 20px rgba(0,0,0,0.15)' : '0 8px 20px rgba(0,0,0,0.1)',
+              transition: `opacity ${TEST_INPUT_FADE_MS}ms ease, box-shadow 0.25s ease, border-color 0.25s ease, width 0.25s ease`,
+            }}
+            onFocus={(e) => { e.currentTarget.style.width = '200px'; }}
+            onBlur={(e) => { e.currentTarget.style.width = '160px'; }}
+          />
+        </div>
+
         {/* Top Navbar */}
         <div
           style={{
@@ -791,6 +940,7 @@ export default function Home() {
             <button
               onClick={handleSaveToRP2040}
               style={{
+                position: 'relative',
                 padding: '10px 20px',
                 borderRadius: '12px',
                 border: 'none',
@@ -809,6 +959,22 @@ export default function Home() {
             >
               <Save size={14} />
               Sync to Hardware
+              {autoSyncPending && (
+                <span
+                  title="Auto-syncing shortly..."
+                  style={{
+                    position: 'absolute',
+                    top: '-3px',
+                    right: '-3px',
+                    width: '9px',
+                    height: '9px',
+                    borderRadius: '50%',
+                    backgroundColor: '#fbbf24',
+                    border: '2px solid rgba(0,0,0,0.15)',
+                    animation: 'pulseDot 1s ease-in-out infinite',
+                  }}
+                />
+              )}
             </button>
           )}
         </div>
@@ -955,7 +1121,7 @@ export default function Home() {
                 return (
                   <div
                     key={keyName}
-                    onClick={() => setSelectedKeyName(keyName)}
+                    onClick={() => { setComboEditTarget(null); setSelectedKeyName(keyName); }}
                     style={{
                       display: 'flex',
                       justifyContent: 'space-between',
@@ -988,7 +1154,7 @@ export default function Home() {
               <button
                 onClick={addComboRule}
                 disabled={combos.length >= MAX_COMBOS}
-                title={combos.length >= MAX_COMBOS ? `Maksimal ${MAX_COMBOS} combo (batas firmware)` : undefined}
+                title={combos.length >= MAX_COMBOS ? `Maximum ${MAX_COMBOS} combos (firmware limit)` : undefined}
                 style={{
                   padding: '3px 8px',
                   fontSize: '10px',
@@ -1005,90 +1171,168 @@ export default function Home() {
               </button>
             </div>
 
+            {/* Chord Detection Window */}
+            <div style={{ background: itemBg, padding: '8px 10px', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '4px' }}>
+                <span style={{ fontSize: '9px', color: subTextColor, fontWeight: 'bold' }}>CHORD WINDOW</span>
+                <span style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: isBgLight ? '#10b981' : '#34d399' }}>
+                  {chordWindowMs}ms
+                </span>
+              </div>
+              <input
+                type="range"
+                min={CHORD_WINDOW_MIN}
+                max={CHORD_WINDOW_MAX}
+                step={5}
+                value={chordWindowMs}
+                onChange={(e) => setChordWindowMs(parseInt(e.target.value, 10))}
+                style={{ width: '100%', accentColor: '#10b981', cursor: 'pointer' }}
+              />
+              <div style={{ fontSize: '8.5px', color: subTextColor, lineHeight: 1.4 }}>
+                Lower = combo keys must be pressed more precisely together. Higher = more forgiving, but single key presses feel a touch delayed. Click "Sync to Hardware" to apply.
+              </div>
+            </div>
+
             {combos.length === 0 ? (
               <div style={{ fontSize: '10px', color: subTextColor, fontStyle: 'italic' }}>
-                Belum ada combo yang dikonfigurasi.
+                No combos configured yet.
               </div>
-            ) : (
-              combos.map((c, cIdx) => (
-                <div
-                  key={cIdx}
-                  style={{
-                    padding: '8px',
-                    borderRadius: '8px',
-                    backgroundColor: itemBg,
-                    border: `1px solid ${glassBorder}`,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '6px',
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: '10px', fontWeight: 'bold', color: textColor }}>
-                      Combo #{cIdx + 1}
-                    </span>
-                    <button
-                      onClick={() => removeComboRule(cIdx)}
-                      style={{ background: 'none', border: 'none', color: '#f87171', fontSize: '10px', cursor: 'pointer', fontWeight: 'bold' }}
+            ) : (() => {
+              // Deteksi combo yang trigger key-nya persis sama (kemungkinan besar tidak sengaja)
+              const seenSignatures = new Map<string, number>();
+              const duplicateIndices = new Set<number>();
+              combos.forEach((c, idx) => {
+                const sig = [...c.keys].sort((a, b) => a - b).join(',');
+                if (seenSignatures.has(sig)) {
+                  duplicateIndices.add(idx);
+                  duplicateIndices.add(seenSignatures.get(sig)!);
+                } else {
+                  seenSignatures.set(sig, idx);
+                }
+              });
+
+              return combos.map((c, cIdx) => {
+                const isExpanded = expandedComboIndex === cIdx;
+                const isDuplicate = duplicateIndices.has(cIdx);
+                const keySummary = `K${[...c.keys].sort((a, b) => a - b).map((k) => k + 1).join('+K')}`;
+
+                return (
+                  <div
+                    key={cIdx}
+                    style={{
+                      padding: '8px',
+                      borderRadius: '8px',
+                      backgroundColor: itemBg,
+                      border: isDuplicate ? '1px solid #f87171' : `1px solid ${glassBorder}`,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '6px',
+                    }}
+                  >
+                    <div
+                      onClick={() => setExpandedComboIndex(isExpanded ? null : cIdx)}
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', gap: '8px' }}
                     >
-                      Hapus
-                    </button>
-                  </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0, flex: 1 }}>
+                        <span style={{ fontSize: '10px', fontWeight: 'bold', color: textColor, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          Combo #{cIdx + 1}
+                          {isDuplicate && (
+                            <span style={{ fontSize: '8px', fontWeight: 700, color: '#f87171', border: '1px solid #f87171', borderRadius: '4px', padding: '1px 4px' }}>
+                              SAME TRIGGER
+                            </span>
+                          )}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: '9px',
+                            fontFamily: "'JetBrains Mono', monospace",
+                            color: subTextColor,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {keySummary} &rarr; {c.modeA ? c.modeA.toUpperCase() : '\u2014'} / {c.modeB ? c.modeB.toUpperCase() : '\u2014'}
+                        </span>
+                      </div>
 
-                  <div style={{ fontSize: '9px', color: subTextColor }}>Trigger Keys:</div>
-                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                    {[0, 1, 2, 3, 4].map((kIdx) => (
-                      <label key={kIdx} style={{ fontSize: '9px', display: 'flex', alignItems: 'center', gap: '2px', cursor: 'pointer' }}>
-                        <input
-                          type="checkbox"
-                          checked={c.keys.includes(kIdx)}
-                          onChange={() => toggleComboKey(cIdx, kIdx)}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); removeComboRule(cIdx); }}
+                          style={{ background: 'none', border: 'none', color: '#f87171', fontSize: '10px', cursor: 'pointer', fontWeight: 'bold' }}
+                        >
+                          Remove
+                        </button>
+                        <ChevronDown
+                          size={14}
+                          style={{
+                            color: subTextColor,
+                            transform: isExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                            transition: 'transform 0.2s ease',
+                          }}
                         />
-                        K{kIdx + 1}
-                      </label>
-                    ))}
-                  </div>
+                      </div>
+                    </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', marginTop: '4px' }}>
-                    <input
-                      type="text"
-                      placeholder="Out A"
-                      value={c.modeA}
-                      onChange={(e) => handleComboOutputChange(cIdx, 'modeA', e.target.value)}
-                      style={{
-                        padding: '4px',
-                        fontSize: '9px',
-                        borderRadius: '4px',
-                        border: `1px solid ${glassBorder}`,
-                        backgroundColor: glassPanelBg,
-                        color: textColor,
-                        outline: 'none',
-                      }}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Out B"
-                      value={c.modeB}
-                      onChange={(e) => handleComboOutputChange(cIdx, 'modeB', e.target.value)}
-                      style={{
-                        padding: '4px',
-                        fontSize: '9px',
-                        borderRadius: '4px',
-                        border: `1px solid ${glassBorder}`,
-                        backgroundColor: glassPanelBg,
-                        color: textColor,
-                        outline: 'none',
-                      }}
-                    />
+                    {isExpanded && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <div style={{ fontSize: '9px', color: subTextColor }}>Trigger Keys:</div>
+                        <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                          {[0, 1, 2, 3, 4].map((kIdx) => (
+                            <label key={kIdx} style={{ fontSize: '9px', display: 'flex', alignItems: 'center', gap: '2px', cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                checked={c.keys.includes(kIdx)}
+                                onChange={() => toggleComboKey(cIdx, kIdx)}
+                              />
+                              K{kIdx + 1}
+                            </label>
+                          ))}
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px', marginTop: '4px' }}>
+                          {(['modeA', 'modeB'] as const).map((field) => {
+                            const isEditingThis = comboEditTarget?.index === cIdx && comboEditTarget?.field === field;
+                            const value = c[field];
+                            return (
+                              <button
+                                key={field}
+                                onClick={() => { setSelectedKeyName(null); setComboEditTarget({ index: cIdx, field }); }}
+                                title="Click to pick modifier / keycode"
+                                style={{
+                                  padding: '6px 4px',
+                                  fontSize: '9px',
+                                  fontFamily: "'JetBrains Mono', monospace",
+                                  fontWeight: 700,
+                                  borderRadius: '4px',
+                                  border: isEditingThis ? '1px solid #2563eb' : `1px solid ${glassBorder}`,
+                                  backgroundColor: isEditingThis ? 'rgba(37, 99, 235, 0.15)' : glassPanelBg,
+                                  color: value ? (isBgLight ? '#0284c7' : '#38bdf8') : subTextColor,
+                                  outline: 'none',
+                                  cursor: 'pointer',
+                                  textTransform: 'uppercase',
+                                  textAlign: 'left',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                              >
+                                {value || `Out ${field === 'modeA' ? 'A' : 'B'}`}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))
-            )}
+                );
+              });
+            })()}
           </div>
         </div>
 
-        {/* Right Mapping Panel */}
-        {selectedKeyName && selectedKeyName.startsWith('key_') && (
+        {/* Right Mapping Panel — dipakai untuk tombol fisik MAUPUN binding combo */}
+        {((selectedKeyName && selectedKeyName.startsWith('key_')) || comboEditTarget) && (
           <div
             style={{
               position: 'absolute',
@@ -1108,10 +1352,12 @@ export default function Home() {
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
               <span style={{ fontSize: '13px', color: textColor, fontWeight: '700', fontFamily: "'JetBrains Mono', monospace" }}>
-                Map Key: {selectedKeyName.toUpperCase()}
+                {comboEditTarget
+                  ? `Combo #${comboEditTarget.index + 1} \u2013 Out ${comboEditTarget.field === 'modeA' ? 'A' : 'B'}`
+                  : `Map Key: ${selectedKeyName?.toUpperCase()}`}
               </span>
               <button
-                onClick={() => setSelectedKeyName(null)}
+                onClick={() => { setSelectedKeyName(null); setComboEditTarget(null); }}
                 style={{ background: 'none', border: 'none', color: subTextColor, cursor: 'pointer', display: 'flex', padding: '4px' }}
               >
                 <X size={16} />
@@ -1121,7 +1367,7 @@ export default function Home() {
             {/* Modifiers Selection */}
             <div style={{ marginBottom: '12px', background: itemBg, padding: '10px', borderRadius: '8px' }}>
               <div style={{ fontSize: '10px', color: isBgLight ? '#0284c7' : '#38bdf8', fontWeight: 'bold', marginBottom: '6px' }}>
-                1. PILIH MODIFIER (opsional, bisa berdiri sendiri):
+                1. PICK MODIFIER (optional, can stand alone):
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '6px' }}>
                 {MODIFIER_KEYS.map((mod) => {
@@ -1164,21 +1410,21 @@ export default function Home() {
                     letterSpacing: '0.02em',
                   }}
                 >
-                  Pasang {selectedModifiers.map((m) => m.toUpperCase()).join('+')} saja (tanpa keycode)
+                  Assign {selectedModifiers.map((m) => m.toUpperCase()).join('+')} only (no keycode)
                 </button>
               )}
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', margin: '2px 0 10px' }}>
               <div style={{ flex: 1, height: '1px', backgroundColor: glassBorder }} />
-              <span style={{ fontSize: '9px', color: subTextColor, fontWeight: 'bold' }}>ATAU</span>
+              <span style={{ fontSize: '9px', color: subTextColor, fontWeight: 'bold' }}>OR</span>
               <div style={{ flex: 1, height: '1px', backgroundColor: glassBorder }} />
             </div>
 
             {/* Keycode Selection */}
             <div style={{ background: itemBg, padding: '10px', borderRadius: '8px', maxHeight: '220px', overflowY: 'auto' }}>
               <div style={{ fontSize: '10px', color: isBgLight ? '#0284c7' : '#38bdf8', fontWeight: 'bold', marginBottom: '6px' }}>
-                2. ATAU PILIH KEYCODE:
+                2. OR PICK KEYCODE:
               </div>
               {AVAILABLE_KEYCODES.map((group) => (
                 <div key={group.group} style={{ marginBottom: '10px' }}>
