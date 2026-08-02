@@ -4,7 +4,7 @@ import { useState, useEffect, Suspense, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, useGLTF, Stage } from '@react-three/drei';
 import * as THREE from 'three';
-import { Settings2, Plug, Save, Check, ArrowLeft, ChevronDown, X, SquareTerminal } from 'lucide-react';
+import { Settings2, Plug, Save, Check, ArrowLeft, ChevronDown, X, SquareTerminal, Download, Upload } from 'lucide-react';
 
 const MODIFIER_KEYS = [
   { id: 'ctrl', label: 'CTRL' },
@@ -25,6 +25,10 @@ const AVAILABLE_KEYCODES = [
   { 
     group: 'Numbers & Symbols', 
     keys: ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'f10', 'f11', 'f12'] 
+  },
+  {
+    group: 'Punctuation',
+    keys: ['-', '=', '[', ']', '\\', ';', "'", ',', '.', '/', '`', '*']
   },
 ];
 
@@ -290,8 +294,110 @@ export default function Home() {
     }, TEST_INPUT_IDLE_MS);
   };
 
+  // --- HIGHLIGHT SAAT TESTING ---
+  // Saat mengetik di field LIVE TEST, cocokkan tombol yang benar-benar ditekan
+  // (termasuk modifier, lewat KeyboardEvent) dengan binding modeA/modeB/combos.
+  // Kalau cocok, K-badge tombol terkait berkedip sebentar di panel "SELECT KEY TO EDIT".
+  const KEY_HIGHLIGHT_MS = 700;
+  const [highlightedKeys, setHighlightedKeys] = useState<number[]>([]);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Notifikasi kecil di bawah field "Type here..." saat combo/tombol terdeteksi
+  const MATCH_LABEL_MS = 1500;
+  const [detectedLabel, setDetectedLabel] = useState<string | null>(null);
+  const detectedLabelTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Ubah KeyboardEvent browser jadi string binding senada format firmware ("ctrl+shift+w", dst)
+  const normalizeKeyEvent = (e: React.KeyboardEvent<HTMLInputElement>): string | null => {
+    const mods: string[] = [];
+    if (e.ctrlKey) mods.push('ctrl');
+    if (e.shiftKey) mods.push('shift');
+    if (e.altKey) mods.push('alt');
+    if (e.metaKey) mods.push('win');
+
+    const rawKey = e.key;
+
+    // Modifier ditekan sendirian -> cocokkan dengan binding modifier-only ("alt", "ctrl+shift", dst)
+    if (rawKey === 'Control' || rawKey === 'Shift' || rawKey === 'Alt' || rawKey === 'Meta') {
+      return mods.length > 0 ? mods.join('+') : null;
+    }
+
+    const specialMap: Record<string, string> = {
+      Enter: 'enter',
+      ' ': 'space',
+      Tab: 'tab',
+      Escape: 'esc',
+      Backspace: 'backspace',
+      Delete: 'delete',
+      CapsLock: 'capslock',
+      ArrowUp: 'up',
+      ArrowDown: 'down',
+      ArrowLeft: 'left',
+      ArrowRight: 'right',
+    };
+
+    let mainKey: string;
+    if (specialMap[rawKey]) mainKey = specialMap[rawKey];
+    else if (/^F([1-9]|1[0-2])$/.test(rawKey)) mainKey = rawKey.toLowerCase();
+    else if (rawKey.length === 1) mainKey = rawKey.toLowerCase();
+    else return null; // tombol lain yang firmware tidak kenali (mis. "Insert", "PageUp")
+
+    return [...mods, mainKey].join('+');
+  };
+
+  // Cari index tombol fisik (0-4) yang bindingnya (di modeA, modeB, atau salah satu combo) cocok
+  const findMatchingKeyIndices = (bindingStr: string): number[] => {
+    const target = bindingStr.toLowerCase();
+    const indices = new Set<number>();
+    // Hanya cocokkan terhadap mode (A/B) yang sedang kamu lihat di tab editor.
+    // Kalau dua binding sama persis ("w") tapi ada di kunci fisik berbeda antar
+    // Mode A dan Mode B, mengecek keduanya sekaligus akan menyalakan dua-duanya
+    // walau kamu cuma menekan satu tombol fisik -> membingungkan. Web app tidak
+    // tahu posisi saklar SPDT fisik secara real-time, jadi asumsi paling masuk akal
+    // adalah: kamu sedang menguji mode yang sedang terbuka di layar.
+    const currentModeArr = activeMode === 'modeA' ? modeA : modeB;
+    currentModeArr.forEach((b, i) => { if (b && b.toLowerCase() === target) indices.add(i); });
+    combos.forEach((c) => {
+      const bindingForActiveMode = activeMode === 'modeA' ? c.modeA : c.modeB;
+      if (bindingForActiveMode && bindingForActiveMode.toLowerCase() === target) {
+        c.keys.forEach((k) => indices.add(k));
+      }
+    });
+    return Array.from(indices);
+  };
+
+  const handleTestInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const normalized = normalizeKeyEvent(e);
+    if (!normalized) return;
+
+    const matches = findMatchingKeyIndices(normalized);
+    if (matches.length === 0) return;
+
+    setHighlightedKeys(matches);
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => setHighlightedKeys([]), KEY_HIGHLIGHT_MS);
+
+    // Tentukan label: kalau cocok dengan sebuah combo, tunjukkan nomor combo + tombol
+    // pemicunya; kalau bukan, berarti tombol individu biasa.
+    const target = normalized.toLowerCase();
+    const comboIdx = combos.findIndex((c) => {
+      const b = activeMode === 'modeA' ? c.modeA : c.modeB;
+      return b && b.toLowerCase() === target;
+    });
+    const label = comboIdx !== -1
+      ? `Combo #${comboIdx + 1} \u2022 K${combos[comboIdx].keys.map((k) => k + 1).sort().join('+K')}`
+      : `Key ${matches[0] + 1}`;
+
+    setDetectedLabel(label);
+    if (detectedLabelTimerRef.current) clearTimeout(detectedLabelTimerRef.current);
+    detectedLabelTimerRef.current = setTimeout(() => setDetectedLabel(null), MATCH_LABEL_MS);
+  };
+
   // Bersihkan timer kalau komponen unmount, supaya tidak ada setState setelah unmount
-  useEffect(() => clearTestTimers, []);
+  useEffect(() => () => {
+    clearTestTimers();
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+  }, []);
 
   // Status balasan dari firmware saat SET_KEYMAP (success / warning / error)
   const [syncStatus, setSyncStatus] = useState<{ level: string; message: string } | null>(null);
@@ -421,6 +527,64 @@ export default function Home() {
     setAutoSyncPending(false);
   };
 
+  // --- EXPORT / IMPORT CONFIG ---
+  const importFileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExportConfig = () => {
+    const data = {
+      _format: 'aline-configurator',
+      _exportedAt: new Date().toISOString(),
+      modeA,
+      modeB,
+      combos,
+      chordWindowMs,
+      modeAName,
+      modeBName,
+      palette: currentPalette,
+      isCustomTheme,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `aline-config-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportClick = () => importFileInputRef.current?.click();
+
+  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // reset supaya file yang sama bisa dipilih lagi nanti
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result as string);
+        if (!Array.isArray(parsed.modeA) || !Array.isArray(parsed.modeB)) {
+          throw new Error('Missing modeA/modeB');
+        }
+        setModeA(parsed.modeA);
+        setModeB(parsed.modeB);
+        if (Array.isArray(parsed.combos)) setCombos(parsed.combos);
+        if (typeof parsed.chordWindowMs === 'number') setChordWindowMs(parsed.chordWindowMs);
+        if (typeof parsed.modeAName === 'string') setModeAName(parsed.modeAName);
+        if (typeof parsed.modeBName === 'string') setModeBName(parsed.modeBName);
+        if (parsed.palette) setCurrentPalette(parsed.palette);
+        if (typeof parsed.isCustomTheme === 'boolean') setIsCustomTheme(parsed.isCustomTheme);
+        setSyncStatus({ level: 'success', message: 'Config imported. Sync to Hardware to apply.' });
+      } catch (err) {
+        console.error('Import config error:', err);
+        setSyncStatus({ level: 'error', message: 'Invalid config file' });
+      }
+    };
+    reader.readAsText(file);
+  };
+
   // HANDLERS COMBO
   const addComboRule = () => {
     if (combos.length >= MAX_COMBOS) return; // firmware cuma menyimpan sampai MAX_COMBOS
@@ -528,6 +692,10 @@ export default function Home() {
         @keyframes pulseDot {
           0%, 100% { transform: scale(1); opacity: 1; }
           50% { transform: scale(1.4); opacity: 0.6; }
+        }
+        @keyframes fadeInUp {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
         }
         @media (prefers-reduced-motion: reduce) {
           * { animation: none !important; transition: none !important; }
@@ -840,6 +1008,7 @@ export default function Home() {
             type="text"
             value={testInputValue}
             onChange={(e) => handleTestInputChange(e.target.value)}
+            onKeyDown={handleTestInputKeyDown}
             placeholder="Type here..."
             style={{
               width: '160px',
@@ -860,6 +1029,28 @@ export default function Home() {
             onFocus={(e) => { e.currentTarget.style.width = '200px'; }}
             onBlur={(e) => { e.currentTarget.style.width = '160px'; }}
           />
+          {detectedLabel && (
+            <div
+              style={{
+                marginTop: '6px',
+                textAlign: 'center',
+                fontSize: '9px',
+                fontFamily: "'JetBrains Mono', monospace",
+                fontWeight: 700,
+                color: '#10b981',
+                backgroundColor: glassPanelBg,
+                backdropFilter: 'blur(12px)',
+                border: '1px solid rgba(16, 185, 129, 0.4)',
+                borderRadius: '999px',
+                padding: '3px 10px',
+                boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+                animation: 'fadeInUp 0.2s ease',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              ✓ {detectedLabel}
+            </div>
+          )}
         </div>
 
         {/* Top Navbar */}
@@ -1002,6 +1193,59 @@ export default function Home() {
             pointerEvents: viewMode === 'config' ? 'auto' : 'none',
           }}
         >
+          {/* Export / Import Config */}
+          <div style={{ display: 'flex', gap: '6px' }}>
+            <button
+              onClick={handleExportConfig}
+              title="Export config as JSON"
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                padding: '7px',
+                fontSize: '10px',
+                fontWeight: 700,
+                borderRadius: '8px',
+                border: `1px solid ${glassBorder}`,
+                backgroundColor: itemBg,
+                color: textColor,
+                cursor: 'pointer',
+              }}
+            >
+              <Download size={12} /> Export
+            </button>
+            <button
+              onClick={handleImportClick}
+              title="Import config from JSON"
+              style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '6px',
+                padding: '7px',
+                fontSize: '10px',
+                fontWeight: 700,
+                borderRadius: '8px',
+                border: `1px solid ${glassBorder}`,
+                backgroundColor: itemBg,
+                color: textColor,
+                cursor: 'pointer',
+              }}
+            >
+              <Upload size={12} /> Import
+            </button>
+            <input
+              ref={importFileInputRef}
+              type="file"
+              accept="application/json"
+              onChange={handleImportFile}
+              style={{ display: 'none' }}
+            />
+          </div>
+
           {/* Theme Selector */}
           <div>
             <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '8px', color: isBgLight ? '#0284c7' : '#38bdf8' }}>
@@ -1118,6 +1362,7 @@ export default function Home() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontSize: '11px' }}>
               {[0, 1, 2, 3, 4].map((idx) => {
                 const keyName = `key_${idx + 1}`;
+                const isHighlighted = highlightedKeys.includes(idx);
                 return (
                   <div
                     key={keyName}
@@ -1129,8 +1374,9 @@ export default function Home() {
                       borderRadius: '6px',
                       backgroundColor: selectedKeyName === keyName ? (isBgLight ? 'rgba(217, 119, 6, 0.15)' : 'rgba(245, 158, 11, 0.2)') : 'transparent',
                       border: selectedKeyName === keyName ? '1px solid #f59e0b' : '1px solid transparent',
+                      boxShadow: isHighlighted ? '0 0 0 2px rgba(16, 185, 129, 0.6)' : 'none',
                       cursor: 'pointer',
-                      transition: 'background-color 0.15s ease',
+                      transition: 'background-color 0.15s ease, box-shadow 0.3s ease',
                     }}
                   >
                     <span style={{ color: subTextColor }}>Key {idx + 1}:</span>
