@@ -588,13 +588,22 @@ export default function Home() {
   // HANDLERS COMBO
   const addComboRule = () => {
     if (combos.length >= MAX_COMBOS) return; // firmware cuma menyimpan sampai MAX_COMBOS
+    const newIndex = combos.length;
     setCombos([...combos, { keys: [0, 1], modeA: 'q', modeB: 'ctrl+q' }]);
-    setExpandedComboIndex(combos.length); // langsung buka combo baru ini untuk diedit
+    setExpandedComboIndex(newIndex); // langsung buka combo baru ini untuk diedit
+    // PENTING: kalau panel picker masih terbuka dari combo lain sebelumnya,
+    // comboEditTarget masih menunjuk ke combo LAMA itu. Tanpa baris ini, klik
+    // keycode setelah "+ Add Combo" akan menimpa combo yang sudah diedit
+    // sebelumnya, bukan combo yang baru dibuat. Sekalian arahkan langsung ke
+    // Out A combo baru supaya siap diedit.
+    setSelectedKeyName(null);
+    setComboEditTarget({ index: newIndex, field: 'modeA' });
   };
 
   const removeComboRule = (index: number) => {
     setCombos(combos.filter((_, i) => i !== index));
     setExpandedComboIndex(null); // hindari nyangkut di index yang sudah bergeser
+    setComboEditTarget(null);    // sama alasannya: index combo lain bisa bergeser setelah dihapus
   };
 
   const toggleComboKey = (comboIndex: number, keyIndex: number) => {
