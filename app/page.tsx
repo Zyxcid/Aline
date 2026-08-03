@@ -154,6 +154,19 @@ export default function Home() {
   const [modeA, setModeA] = useState<ModeKeymap>(['s', 'a', 'w', 'd', 'r']);
   const [modeB, setModeB] = useState<ModeKeymap>(['tab', 'ctrl', 'alt', 't', 'w']);
 
+  // Tap-vs-Hold: binding terpisah yang aktif kalau tombol ditahan melewati holdThresholdMs.
+  // String kosong = fitur hold nonaktif untuk tombol itu (perilaku identik seperti sebelumnya).
+  const [modeAHold, setModeAHold] = useState<ModeKeymap>(['', '', '', '', '']);
+  const [modeBHold, setModeBHold] = useState<ModeKeymap>(['', '', '', '', '']);
+
+  // Ambang tekan-tahan (ms) — harus sinkron dengan HOLD_THRESHOLD_MIN_MS/MAX_MS di firmware
+  const HOLD_THRESHOLD_MIN = 100;
+  const HOLD_THRESHOLD_MAX = 1000;
+  const [holdThresholdMs, setHoldThresholdMs] = useState(200);
+
+  // Saat panel Map Key terbuka: apakah sedang mengedit TAP binding (default) atau HOLD binding
+  const [editingHoldBinding, setEditingHoldBinding] = useState(false);
+
   // STATE COMBO RULES
   const [combos, setCombos] = useState<ComboRule[]>([
     { keys: [0, 1], modeA: 'q', modeB: 'ctrl+q' }
@@ -207,8 +220,11 @@ export default function Home() {
         const parsed = JSON.parse(savedConfig);
         if (parsed.modeA) setModeA(parsed.modeA);
         if (parsed.modeB) setModeB(parsed.modeB);
+        if (parsed.modeAHold) setModeAHold(parsed.modeAHold);
+        if (parsed.modeBHold) setModeBHold(parsed.modeBHold);
         if (parsed.combos) setCombos(parsed.combos);
         if (typeof parsed.chordWindowMs === 'number') setChordWindowMs(parsed.chordWindowMs);
+        if (typeof parsed.holdThresholdMs === 'number') setHoldThresholdMs(parsed.holdThresholdMs);
         if (parsed.modeAName) setModeAName(parsed.modeAName);
         if (parsed.modeBName) setModeBName(parsed.modeBName);
         if (parsed.palette) setCurrentPalette(parsed.palette);
@@ -225,8 +241,11 @@ export default function Home() {
       const dataToSave = {
         modeA,
         modeB,
+        modeAHold,
+        modeBHold,
         combos,
         chordWindowMs,
+        holdThresholdMs,
         modeAName,
         modeBName,
         palette: currentPalette,
@@ -236,7 +255,7 @@ export default function Home() {
     } catch (e) {
       console.error('Failed to save LocalStorage:', e);
     }
-  }, [modeA, modeB, combos, chordWindowMs, modeAName, modeBName, currentPalette, isCustomTheme]);
+  }, [modeA, modeB, modeAHold, modeBHold, combos, chordWindowMs, holdThresholdMs, modeAName, modeBName, currentPalette, isCustomTheme]);
 
   const [selectedModifiers, setSelectedModifiers] = useState<string[]>([]);
   // Saat mengedit binding sebuah combo (bukan tombol fisik), simpan target di sini
@@ -245,7 +264,9 @@ export default function Home() {
   useEffect(() => {
     if (selectedKeyName && selectedKeyName.startsWith('key_')) {
       const keyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
-      const currentBinding = activeMode === 'modeA' ? modeA[keyIndex] : modeB[keyIndex];
+      const currentBinding = editingHoldBinding
+        ? (activeMode === 'modeA' ? modeAHold[keyIndex] : modeBHold[keyIndex])
+        : (activeMode === 'modeA' ? modeA[keyIndex] : modeB[keyIndex]);
       const parts = (currentBinding || '').split('+');
       const existingMods = parts.slice(0, parts.length - 1);
       setSelectedModifiers(existingMods);
@@ -255,7 +276,7 @@ export default function Home() {
       const existingMods = parts.slice(0, parts.length - 1);
       setSelectedModifiers(existingMods);
     }
-  }, [selectedKeyName, comboEditTarget, activeMode, modeA, modeB, combos]);
+  }, [selectedKeyName, comboEditTarget, activeMode, modeA, modeB, modeAHold, modeBHold, editingHoldBinding, combos]);
 
   // WEB SERIAL MANAGEMENT
   const [isConnected, setIsConnected] = useState(false);
@@ -441,7 +462,7 @@ export default function Home() {
     // (kalau ikut, bisa menimpa keymap asli di hardware dengan state lokal yang lama
     // sebelum GET_KEYMAP sempat balas).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modeA, modeB, combos, chordWindowMs]);
+  }, [modeA, modeB, modeAHold, modeBHold, combos, chordWindowMs, holdThresholdMs]);
 
   const connectSerial = async () => {
     if (!('serial' in navigator)) {
@@ -499,8 +520,11 @@ export default function Home() {
               skipNextAutoSyncRef.current = true;
               if (data.modeA) setModeA(data.modeA);
               if (data.modeB) setModeB(data.modeB);
+              if (data.modeAHold) setModeAHold(data.modeAHold);
+              if (data.modeBHold) setModeBHold(data.modeBHold);
               if (data.combos) setCombos(data.combos);
               if (typeof data.chordWindowMs === 'number') setChordWindowMs(data.chordWindowMs);
+              if (typeof data.holdThresholdMs === 'number') setHoldThresholdMs(data.holdThresholdMs);
             } else if (data.status) {
               // Firmware mengirim baris terpisah seperti {"status":"warning","message":"..."}
               setSyncStatus({ level: data.status, message: data.message || '' });
@@ -522,7 +546,7 @@ export default function Home() {
       clearTimeout(autoSyncTimerRef.current);
       autoSyncTimerRef.current = null;
     }
-    sendSerialMessage({ type: 'SET_KEYMAP', modeA, modeB, combos, chordWindowMs });
+    sendSerialMessage({ type: 'SET_KEYMAP', modeA, modeB, modeAHold, modeBHold, combos, chordWindowMs, holdThresholdMs });
     setLastSyncedAt(Date.now());
     setAutoSyncPending(false);
   };
@@ -536,8 +560,11 @@ export default function Home() {
       _exportedAt: new Date().toISOString(),
       modeA,
       modeB,
+      modeAHold,
+      modeBHold,
       combos,
       chordWindowMs,
+      holdThresholdMs,
       modeAName,
       modeBName,
       palette: currentPalette,
@@ -570,8 +597,11 @@ export default function Home() {
         }
         setModeA(parsed.modeA);
         setModeB(parsed.modeB);
+        if (Array.isArray(parsed.modeAHold)) setModeAHold(parsed.modeAHold);
+        if (Array.isArray(parsed.modeBHold)) setModeBHold(parsed.modeBHold);
         if (Array.isArray(parsed.combos)) setCombos(parsed.combos);
         if (typeof parsed.chordWindowMs === 'number') setChordWindowMs(parsed.chordWindowMs);
+        if (typeof parsed.holdThresholdMs === 'number') setHoldThresholdMs(parsed.holdThresholdMs);
         if (typeof parsed.modeAName === 'string') setModeAName(parsed.modeAName);
         if (typeof parsed.modeBName === 'string') setModeBName(parsed.modeBName);
         if (parsed.palette) setCurrentPalette(parsed.palette);
@@ -597,6 +627,7 @@ export default function Home() {
     // sebelumnya, bukan combo yang baru dibuat. Sekalian arahkan langsung ke
     // Out A combo baru supaya siap diedit.
     setSelectedKeyName(null);
+    setEditingHoldBinding(false);
     setComboEditTarget({ index: newIndex, field: 'modeA' });
   };
 
@@ -604,6 +635,7 @@ export default function Home() {
     setCombos(combos.filter((_, i) => i !== index));
     setExpandedComboIndex(null); // hindari nyangkut di index yang sudah bergeser
     setComboEditTarget(null);    // sama alasannya: index combo lain bisa bergeser setelah dihapus
+    setEditingHoldBinding(false);
   };
 
   const toggleComboKey = (comboIndex: number, keyIndex: number) => {
@@ -643,6 +675,19 @@ export default function Home() {
 
     if (!selectedKeyName || !selectedKeyName.startsWith('key_')) return;
     const keyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
+
+    if (editingHoldBinding) {
+      if (activeMode === 'modeA') {
+        const updated = [...modeAHold];
+        updated[keyIndex] = binding;
+        setModeAHold(updated);
+      } else {
+        const updated = [...modeBHold];
+        updated[keyIndex] = binding;
+        setModeBHold(updated);
+      }
+      return;
+    }
 
     if (activeMode === 'modeA') {
       const updated = [...modeA];
@@ -730,6 +775,7 @@ export default function Home() {
                 isInteractive={viewMode === 'config'}
                 onSelectKey={(keyName) => {
                   setComboEditTarget(null);
+                  setEditingHoldBinding(false);
                   setSelectedKeyName(keyName);
                 }}
               />
@@ -1080,6 +1126,7 @@ export default function Home() {
             onClick={() => {
               setViewMode('hero');
               setSelectedKeyName(null);
+              setEditingHoldBinding(false);
             }}
             style={{
               padding: '10px 20px',
@@ -1375,7 +1422,7 @@ export default function Home() {
                 return (
                   <div
                     key={keyName}
-                    onClick={() => { setComboEditTarget(null); setSelectedKeyName(keyName); }}
+                    onClick={() => { setComboEditTarget(null); setEditingHoldBinding(false); setSelectedKeyName(keyName); }}
                     style={{
                       display: 'flex',
                       justifyContent: 'space-between',
@@ -1552,7 +1599,7 @@ export default function Home() {
                             return (
                               <button
                                 key={field}
-                                onClick={() => { setSelectedKeyName(null); setComboEditTarget({ index: cIdx, field }); }}
+                                onClick={() => { setSelectedKeyName(null); setEditingHoldBinding(false); setComboEditTarget({ index: cIdx, field }); }}
                                 title="Click to pick modifier / keycode"
                                 style={{
                                   padding: '6px 4px',
@@ -1584,6 +1631,33 @@ export default function Home() {
               });
             })()}
           </div>
+
+          {/* MODUL TAP VS HOLD */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <span style={{ fontSize: '11px', fontWeight: 'bold', color: isBgLight ? '#0284c7' : '#38bdf8' }}>
+              TAP vs HOLD
+            </span>
+            <div style={{ background: itemBg, padding: '8px 10px', borderRadius: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '4px' }}>
+                <span style={{ fontSize: '9px', color: subTextColor, fontWeight: 'bold' }}>HOLD THRESHOLD</span>
+                <span style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: isBgLight ? '#10b981' : '#34d399' }}>
+                  {holdThresholdMs}ms
+                </span>
+              </div>
+              <input
+                type="range"
+                min={HOLD_THRESHOLD_MIN}
+                max={HOLD_THRESHOLD_MAX}
+                step={25}
+                value={holdThresholdMs}
+                onChange={(e) => setHoldThresholdMs(parseInt(e.target.value, 10))}
+                style={{ width: '100%', accentColor: '#10b981', cursor: 'pointer' }}
+              />
+              <div style={{ fontSize: '8.5px', color: subTextColor, lineHeight: 1.4 }}>
+                How long a key must be held before its Hold binding activates. Only affects keys that actually have a Hold binding set — other keys behave exactly as before, with zero added delay. Set a key's Hold binding from its Map Key panel.
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Right Mapping Panel — dipakai untuk tombol fisik MAUPUN binding combo */}
@@ -1612,12 +1686,71 @@ export default function Home() {
                   : `Map Key: ${selectedKeyName?.toUpperCase()}`}
               </span>
               <button
-                onClick={() => { setSelectedKeyName(null); setComboEditTarget(null); }}
+                onClick={() => { setSelectedKeyName(null); setComboEditTarget(null); setEditingHoldBinding(false); }}
                 style={{ background: 'none', border: 'none', color: subTextColor, cursor: 'pointer', display: 'flex', padding: '4px' }}
               >
                 <X size={16} />
               </button>
             </div>
+
+            {!comboEditTarget && selectedKeyName && (() => {
+              const editingKeyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
+              const currentHoldVal = activeMode === 'modeA' ? modeAHold[editingKeyIndex] : modeBHold[editingKeyIndex];
+              return (
+                <div style={{ marginBottom: '10px' }}>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button
+                      onClick={() => setEditingHoldBinding(false)}
+                      style={{
+                        flex: 1,
+                        padding: '6px',
+                        fontSize: '10px',
+                        fontWeight: 700,
+                        borderRadius: '6px',
+                        border: !editingHoldBinding ? '1px solid #2563eb' : `1px solid ${glassBorder}`,
+                        backgroundColor: !editingHoldBinding ? 'rgba(37, 99, 235, 0.15)' : 'transparent',
+                        color: textColor,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      TAP
+                    </button>
+                    <button
+                      onClick={() => setEditingHoldBinding(true)}
+                      style={{
+                        flex: 1,
+                        padding: '6px',
+                        fontSize: '10px',
+                        fontWeight: 700,
+                        borderRadius: '6px',
+                        border: editingHoldBinding ? '1px solid #f59e0b' : `1px solid ${glassBorder}`,
+                        backgroundColor: editingHoldBinding ? 'rgba(245, 158, 11, 0.15)' : 'transparent',
+                        color: textColor,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      HOLD{currentHoldVal ? ' \u25cf' : ''}
+                    </button>
+                  </div>
+                  {editingHoldBinding && (
+                    <div style={{ fontSize: '8.5px', color: subTextColor, marginTop: '6px', lineHeight: 1.4 }}>
+                      Activates only if this key is held past the Hold Threshold (see TAP vs HOLD section below).
+                      {currentHoldVal && (
+                        <>
+                          {' '}
+                          <span
+                            onClick={() => assignBinding('')}
+                            style={{ color: '#ef4444', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }}
+                          >
+                            Clear hold binding
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Modifiers Selection */}
             <div style={{ marginBottom: '12px', background: itemBg, padding: '10px', borderRadius: '8px' }}>
