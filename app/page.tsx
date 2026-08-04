@@ -4,7 +4,7 @@ import { useState, useEffect, Suspense, useRef } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, useGLTF, Stage } from '@react-three/drei';
 import * as THREE from 'three';
-import { Settings2, Plug, Save, Check, ArrowLeft, ChevronDown, X, SquareTerminal, Download, Upload } from 'lucide-react';
+import { Settings2, Plug, Save, Check, ChevronDown, X, SquareTerminal, Download, Upload } from 'lucide-react';
 
 const MODIFIER_KEYS = [
   { id: 'ctrl', label: 'CTRL' },
@@ -58,6 +58,65 @@ export interface ComboRule {
   modeA: string;
   modeB: string;
 }
+
+interface PresetData {
+  modeA: ModeKeymap;
+  modeB: ModeKeymap;
+  modeAHold: ModeKeymap;
+  modeBHold: ModeKeymap;
+  combos: ComboRule[];
+  chordWindowMs: number;
+  holdThresholdMs: number;
+  modeAName: string;
+  modeBName: string;
+}
+
+interface Preset {
+  id: string;
+  name: string;
+  builtIn: boolean;
+  data: PresetData;
+}
+
+// Preset bawaan aplikasi -- selalu tersedia, tidak bisa dihapus/diubah pengguna.
+// Preset milik pengguna sendiri (hasil "Save as preset") disimpan terpisah di localStorage.
+const BUILT_IN_PRESETS: Preset[] = [
+  {
+    id: 'builtin-factory-default',
+    name: 'Factory Default',
+    builtIn: true,
+    data: {
+      modeA: ['s', 'a', 'w', 'd', 'r'],
+      modeB: ['tab', 'ctrl', 'alt', 't', 'w'],
+      modeAHold: ['', '', '', '', ''],
+      modeBHold: ['', '', '', '', ''],
+      combos: [],
+      chordWindowMs: 35,
+      holdThresholdMs: 200,
+      modeAName: 'Default Work',
+      modeBName: 'Gaming / Secondary',
+    },
+  },
+  {
+    id: 'builtin-browser-shortcuts',
+    name: 'Browser Shortcuts',
+    builtIn: true,
+    data: {
+      modeA: ['ctrl+t', 'ctrl+w', 'ctrl+tab', 'ctrl+shift+tab', 'ctrl+l'],
+      modeB: ['ctrl+shift+t', 'f5', 'ctrl+d', 'ctrl+shift+n', 'alt'],
+      modeAHold: ['', '', '', '', ''],
+      modeBHold: ['', '', '', '', ''],
+      combos: [
+        { keys: [0, 1], modeA: 'ctrl+shift+t', modeB: '' },
+        { keys: [2, 3], modeA: 'ctrl+shift+tab', modeB: '' },
+      ],
+      chordWindowMs: 35,
+      holdThresholdMs: 200,
+      modeAName: 'Tabs',
+      modeBName: 'Browser Actions',
+    },
+  },
+];
 
 // Helper untuk mendeteksi apakah warna HEX tergolong terang
 function isLightColor(hex: string): boolean {
@@ -143,9 +202,144 @@ function KeyboardModel({
 export default function Home() {
   const [currentPalette, setCurrentPalette] = useState<ColorPalette>(PALETTES[0]);
   const [isCustomTheme, setIsCustomTheme] = useState(false);
+
+  // --- PRESETS (bawaan + buatan pengguna sendiri, disimpan di localStorage) ---
+  const USER_PRESETS_KEY = 'aline_user_presets';
+  const [userPresets, setUserPresets] = useState<Preset[]>([]);
+  const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [newPresetName, setNewPresetName] = useState('');
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(USER_PRESETS_KEY);
+      if (raw) setUserPresets(JSON.parse(raw));
+    } catch (e) {
+      console.error('Failed to load presets:', e);
+    }
+  }, []);
   const [selectedKeyName, setSelectedKeyName] = useState<string | null>(null);
 
   const [viewMode, setViewMode] = useState<'hero' | 'config'>('hero');
+
+  // "hero" sekarang dipakai sebagai slot tampilan TUTORIAL (bukan halaman marketing lagi).
+  // Default-nya tetap tampil (aman untuk render pertama), tapi begitu tahu localStorage
+  // sudah punya penanda "sudah pernah lihat", langsung lompat ke config -- ini dicek di
+  // useEffect (bukan langsung di useState initializer) supaya tidak ada mismatch render
+  // client/server.
+  const TUTORIAL_SEEN_KEY = 'aline_tutorial_dismissed';
+  useEffect(() => {
+    try {
+      if (localStorage.getItem(TUTORIAL_SEEN_KEY)) {
+        setViewMode('config');
+      }
+    } catch (e) {
+      // localStorage tidak tersedia (mis. private browsing) -> biarkan tutorial tetap tampil
+    }
+  }, []);
+
+  const dismissTutorial = () => {
+    setViewMode('config');
+    try { localStorage.setItem(TUTORIAL_SEEN_KEY, '1'); } catch (e) { /* abaikan */ }
+  };
+
+  const reopenTutorial = () => {
+    setSelectedKeyName(null);
+    setComboEditTarget(null);
+    setEditingHoldBinding(false);
+    setTutorialStep(0);
+    setViewMode('hero');
+  };
+
+  // --- TUTORIAL STEP-BY-STEP: highlight ring menempel ke elemen ASLI (bukan koordinat
+  // tebakan) via ref + getBoundingClientRect, supaya tetap presisi walau layout berubah.
+  const tutorialLiveTestRef = useRef<HTMLDivElement>(null);
+  const tutorialConnectRef = useRef<HTMLButtonElement>(null);
+  const tutorialSelectKeyRef = useRef<HTMLDivElement>(null);
+  const tutorialComboRef = useRef<HTMLDivElement>(null);
+  const tutorialHoldRef = useRef<HTMLDivElement>(null);
+  const tutorialExportRef = useRef<HTMLDivElement>(null);
+
+  type TutorialStep = { ref: React.RefObject<HTMLElement | null>; title: string; body: string; placement: 'bottom' | 'top' | 'left' | 'right' };
+
+  const TUTORIAL_STEPS: TutorialStep[] = [
+    {
+      ref: tutorialLiveTestRef,
+      title: 'Live Test',
+      body: 'Click in and press your macropad keys. Whatever binding fires gets named here — including which combo or hold triggered it.',
+      placement: 'bottom',
+    },
+    {
+      ref: tutorialConnectRef,
+      title: 'Connect & Sync',
+      body: 'Connect your RP2040 over USB Web Serial. Once connected, edits auto-sync to the flash a couple seconds after you stop changing things — no need to click Sync yourself every time.',
+      placement: 'bottom',
+    },
+    {
+      ref: tutorialSelectKeyRef,
+      title: 'Select a key',
+      body: 'Pick a key here (or click it on the 3D model). The Map Key panel opens with a TAP / HOLD tab — TAP is the normal binding, HOLD only fires if you hold the key past a threshold.',
+      placement: 'right',
+    },
+    {
+      ref: tutorialComboRef,
+      title: 'Combo Rules',
+      body: 'Chain 2–5 keys into one combo binding — press them together within the Chord Window to trigger it. Each combo card is collapsible, and duplicate trigger sets get flagged automatically.',
+      placement: 'right',
+    },
+    {
+      ref: tutorialHoldRef,
+      title: 'Tap vs Hold',
+      body: 'This threshold decides how long a key must be held before its HOLD binding takes over from its TAP binding. Only keys with a HOLD binding configured are affected — everything else is instant, as usual.',
+      placement: 'right',
+    },
+    {
+      ref: tutorialExportRef,
+      title: 'Export / Import',
+      body: 'Back up your whole config as a file, or load one you saved earlier — handy before experimenting, or to share a layout with someone else.',
+      placement: 'right',
+    },
+  ];
+
+  const [tutorialStep, setTutorialStep] = useState(0);
+  const [tutorialRect, setTutorialRect] = useState<{ top: number; left: number; width: number; height: number } | null>(null);
+
+  // Ukur ulang posisi target tiap kali step berganti / tutorial dibuka / ukuran window berubah
+  useEffect(() => {
+    if (viewMode !== 'hero') return;
+
+    const measure = () => {
+      const el = TUTORIAL_STEPS[tutorialStep]?.ref.current;
+      if (!el) { setTutorialRect(null); return; }
+      // PENTING: pakai 'auto' (instan), bukan 'smooth'. Smooth-scroll butuh ratusan ms
+      // untuk selesai, tapi sebelumnya kita cuma nunggu 1 requestAnimationFrame (~16ms)
+      // sebelum mengukur posisi -> hasil ukur diambil di TENGAH animasi scroll, jadi
+      // salah, terutama untuk target yang jauh di bawah panel yang scrollable (mis.
+      // Export/Import). Dengan scroll instan + double rAF, layout sudah pasti settle
+      // sebelum getBoundingClientRect() dipanggil.
+      el.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const r = el.getBoundingClientRect();
+          setTutorialRect({ top: r.top, left: r.left, width: r.width, height: r.height });
+        });
+      });
+    };
+
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, tutorialStep]);
+
+  // Escape untuk menutup tutorial kapan saja
+  useEffect(() => {
+    if (viewMode !== 'hero') return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismissTutorial();
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode]);
 
   const [activeMode, setActiveMode] = useState<'modeA' | 'modeB'>('modeA');
   const [modeAName, setModeAName] = useState('Default Work');
@@ -189,28 +383,6 @@ export default function Home() {
   const glassPanelBg = isBgLight ? 'rgba(255, 255, 255, 0.9)' : 'rgba(15, 23, 42, 0.85)';
   const glassBorder = isBgLight ? 'rgba(0, 0, 0, 0.12)' : 'rgba(255, 255, 255, 0.12)';
   const itemBg = isBgLight ? 'rgba(0, 0, 0, 0.05)' : 'rgba(255, 255, 255, 0.04)';
-
-  // Scroll handler untuk Hero
-  useEffect(() => {
-    let timeoutId: NodeJS.Timeout;
-
-    const handleWheel = (e: WheelEvent) => {
-      if (viewMode === 'hero') {
-        clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
-          if (e.deltaY > 20) {
-            setViewMode('config');
-          }
-        }, 50);
-      }
-    };
-
-    window.addEventListener('wheel', handleWheel, { passive: true });
-    return () => {
-      window.removeEventListener('wheel', handleWheel);
-      clearTimeout(timeoutId);
-    };
-  }, [viewMode]);
 
   // Load LocalStorage
   useEffect(() => {
@@ -280,6 +452,10 @@ export default function Home() {
 
   // WEB SERIAL MANAGEMENT
   const [isConnected, setIsConnected] = useState(false);
+  // Posisi saklar SPDT fisik SEBENARNYA, dilaporkan real-time oleh firmware -- terpisah
+  // dari `activeMode` (tab yang sedang kamu buka di web untuk EDIT). null = belum tahu
+  // (belum connect / belum ada laporan dari firmware).
+  const [hardwareActiveMode, setHardwareActiveMode] = useState<'A' | 'B' | null>(null);
   const portRef = useRef<any>(null);
   const readerRef = useRef<any>(null);
 
@@ -376,8 +552,15 @@ export default function Home() {
     // walau kamu cuma menekan satu tombol fisik -> membingungkan. Web app tidak
     // tahu posisi saklar SPDT fisik secara real-time, jadi asumsi paling masuk akal
     // adalah: kamu sedang menguji mode yang sedang terbuka di layar.
-    const currentModeArr = activeMode === 'modeA' ? modeA : modeB;
-    currentModeArr.forEach((b, i) => { if (b && b.toLowerCase() === target) indices.add(i); });
+    const currentTapArr = activeMode === 'modeA' ? modeA : modeB;
+    const currentHoldArr = activeMode === 'modeA' ? modeAHold : modeBHold;
+    currentTapArr.forEach((b, i) => { if (b && b.toLowerCase() === target) indices.add(i); });
+    // PENTING: hold binding juga harus dicek di sini. Kalau tidak, tombol yang
+    // sedang di-hold dan outputnya kebetulan sama persis dengan output sebuah
+    // combo (mis. sama-sama "w") tidak akan pernah ikut ter-highlight -- yang
+    // muncul cuma combo-nya, padahal yang benar-benar terjadi adalah hold pada
+    // satu tombol fisik, bukan combo.
+    currentHoldArr.forEach((b, i) => { if (b && b.toLowerCase() === target) indices.add(i); });
     combos.forEach((c) => {
       const bindingForActiveMode = activeMode === 'modeA' ? c.modeA : c.modeB;
       if (bindingForActiveMode && bindingForActiveMode.toLowerCase() === target) {
@@ -398,16 +581,26 @@ export default function Home() {
     if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
     highlightTimerRef.current = setTimeout(() => setHighlightedKeys([]), KEY_HIGHLIGHT_MS);
 
-    // Tentukan label: kalau cocok dengan sebuah combo, tunjukkan nomor combo + tombol
-    // pemicunya; kalau bukan, berarti tombol individu biasa.
+    // Tentukan label: daftar SEMUA sumber yang cocok (tap / hold / combo), bukan cuma
+    // salah satu dipilih secara sepihak -- karena web app memang tidak bisa tahu pasti
+    // mana yang benar-benar terjadi kalau teksnya kebetulan sama.
     const target = normalized.toLowerCase();
+    const currentTapArr = activeMode === 'modeA' ? modeA : modeB;
+    const currentHoldArr = activeMode === 'modeA' ? modeAHold : modeBHold;
+
+    const labels: string[] = [];
+    matches.forEach((k) => {
+      if (currentTapArr[k] && currentTapArr[k].toLowerCase() === target) labels.push(`Key ${k + 1}`);
+      if (currentHoldArr[k] && currentHoldArr[k].toLowerCase() === target) labels.push(`Key ${k + 1} (Hold)`);
+    });
     const comboIdx = combos.findIndex((c) => {
       const b = activeMode === 'modeA' ? c.modeA : c.modeB;
       return b && b.toLowerCase() === target;
     });
-    const label = comboIdx !== -1
-      ? `Combo #${comboIdx + 1} \u2022 K${combos[comboIdx].keys.map((k) => k + 1).sort().join('+K')}`
-      : `Key ${matches[0] + 1}`;
+    if (comboIdx !== -1) {
+      labels.push(`Combo #${comboIdx + 1} \u2022 K${combos[comboIdx].keys.map((k) => k + 1).sort().join('+K')}`);
+    }
+    const label = labels.join(' / ') || `Key ${matches[0] + 1}`;
 
     setDetectedLabel(label);
     if (detectedLabelTimerRef.current) clearTimeout(detectedLabelTimerRef.current);
@@ -481,6 +674,7 @@ export default function Home() {
     } catch (err) {
       console.error('Serial Connection error:', err);
       setIsConnected(false);
+      setHardwareActiveMode(null);
     }
   };
 
@@ -525,6 +719,12 @@ export default function Home() {
               if (data.combos) setCombos(data.combos);
               if (typeof data.chordWindowMs === 'number') setChordWindowMs(data.chordWindowMs);
               if (typeof data.holdThresholdMs === 'number') setHoldThresholdMs(data.holdThresholdMs);
+              if (data.mode === 'A' || data.mode === 'B') setHardwareActiveMode(data.mode);
+            } else if (data.type === 'MODE_STATUS') {
+              // Firmware broadcast tiap kali saklar SPDT fisik berubah posisi -- murni
+              // informatif, TIDAK auto-pindah tab yang lagi dibuka di web (supaya tidak
+              // mengganggu kalau kamu lagi edit mode yang berbeda dari posisi switch saat itu).
+              if (data.mode === 'A' || data.mode === 'B') setHardwareActiveMode(data.mode);
             } else if (data.status) {
               // Firmware mengirim baris terpisah seperti {"status":"warning","message":"..."}
               setSyncStatus({ level: data.status, message: data.message || '' });
@@ -553,6 +753,28 @@ export default function Home() {
 
   // --- EXPORT / IMPORT CONFIG ---
   const importFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Dipakai bersama oleh Import File DAN Load Preset -- satu tempat menerapkan
+  // sebuah config ke state aktif, supaya keduanya selalu konsisten kalau field
+  // baru ditambahkan di kemudian hari.
+  const applyConfigData = (parsed: any) => {
+    setModeA(parsed.modeA);
+    setModeB(parsed.modeB);
+    if (Array.isArray(parsed.modeAHold)) setModeAHold(parsed.modeAHold);
+    if (Array.isArray(parsed.modeBHold)) setModeBHold(parsed.modeBHold);
+    if (Array.isArray(parsed.combos)) setCombos(parsed.combos);
+    if (typeof parsed.chordWindowMs === 'number') setChordWindowMs(parsed.chordWindowMs);
+    if (typeof parsed.holdThresholdMs === 'number') setHoldThresholdMs(parsed.holdThresholdMs);
+    if (typeof parsed.modeAName === 'string') setModeAName(parsed.modeAName);
+    if (typeof parsed.modeBName === 'string') setModeBName(parsed.modeBName);
+    if (parsed.palette) setCurrentPalette(parsed.palette);
+    if (typeof parsed.isCustomTheme === 'boolean') setIsCustomTheme(parsed.isCustomTheme);
+    // Pastikan tidak ada panel picker yang masih nyangkut ke key/combo dari
+    // config SEBELUMNYA -- index-nya belum tentu valid lagi di config baru.
+    setSelectedKeyName(null);
+    setComboEditTarget(null);
+    setEditingHoldBinding(false);
+  };
 
   const handleExportConfig = () => {
     const data = {
@@ -595,17 +817,7 @@ export default function Home() {
         if (!Array.isArray(parsed.modeA) || !Array.isArray(parsed.modeB)) {
           throw new Error('Missing modeA/modeB');
         }
-        setModeA(parsed.modeA);
-        setModeB(parsed.modeB);
-        if (Array.isArray(parsed.modeAHold)) setModeAHold(parsed.modeAHold);
-        if (Array.isArray(parsed.modeBHold)) setModeBHold(parsed.modeBHold);
-        if (Array.isArray(parsed.combos)) setCombos(parsed.combos);
-        if (typeof parsed.chordWindowMs === 'number') setChordWindowMs(parsed.chordWindowMs);
-        if (typeof parsed.holdThresholdMs === 'number') setHoldThresholdMs(parsed.holdThresholdMs);
-        if (typeof parsed.modeAName === 'string') setModeAName(parsed.modeAName);
-        if (typeof parsed.modeBName === 'string') setModeBName(parsed.modeBName);
-        if (parsed.palette) setCurrentPalette(parsed.palette);
-        if (typeof parsed.isCustomTheme === 'boolean') setIsCustomTheme(parsed.isCustomTheme);
+        applyConfigData(parsed);
         setSyncStatus({ level: 'success', message: 'Config imported. Sync to Hardware to apply.' });
       } catch (err) {
         console.error('Import config error:', err);
@@ -615,11 +827,46 @@ export default function Home() {
     reader.readAsText(file);
   };
 
+  // --- PRESET ACTIONS ---
+  const saveCurrentAsPreset = (name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const preset: Preset = {
+      id: `user-${Date.now()}`,
+      name: trimmed,
+      builtIn: false,
+      data: { modeA, modeB, modeAHold, modeBHold, combos, chordWindowMs, holdThresholdMs, modeAName, modeBName },
+    };
+    const updated = [...userPresets, preset];
+    setUserPresets(updated);
+    try { localStorage.setItem(USER_PRESETS_KEY, JSON.stringify(updated)); } catch (e) { console.error(e); }
+    setSyncStatus({ level: 'success', message: `Saved preset "${trimmed}"` });
+  };
+
+  const loadPreset = (preset: Preset) => {
+    applyConfigData(preset.data);
+    setSyncStatus({ level: 'success', message: `Loaded "${preset.name}". Sync to Hardware to apply.` });
+  };
+
+  const deleteUserPreset = (id: string) => {
+    const updated = userPresets.filter((p) => p.id !== id);
+    setUserPresets(updated);
+    try { localStorage.setItem(USER_PRESETS_KEY, JSON.stringify(updated)); } catch (e) { console.error(e); }
+  };
+
+  const ALL_PRESETS: Preset[] = [...BUILT_IN_PRESETS, ...userPresets];
+
+  const handleLoadSelectedPreset = () => {
+    const preset = ALL_PRESETS.find((p) => p.id === selectedPresetId);
+    if (preset) loadPreset(preset);
+  };
+
+
   // HANDLERS COMBO
   const addComboRule = () => {
     if (combos.length >= MAX_COMBOS) return; // firmware cuma menyimpan sampai MAX_COMBOS
     const newIndex = combos.length;
-    setCombos([...combos, { keys: [0, 1], modeA: 'q', modeB: 'ctrl+q' }]);
+    setCombos([...combos, { keys: [0, 1], modeA: '', modeB: '' }]);
     setExpandedComboIndex(newIndex); // langsung buka combo baru ini untuk diedit
     // PENTING: kalau panel picker masih terbuka dari combo lain sebelumnya,
     // comboEditTarget masih menunjuk ke combo LAMA itu. Tanpa baris ini, klik
@@ -755,6 +1002,59 @@ export default function Home() {
           * { animation: none !important; transition: none !important; }
         }
       `}</style>
+      {/* Brand title + tombol buka ulang tutorial, digabung di kiri atas, selalu tampil */}
+      <div
+        style={{
+          position: 'absolute',
+          top: '24px',
+          left: '40px',
+          zIndex: 50,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+        }}
+      >
+        <span
+          style={{
+            fontFamily: "'Space Grotesk', 'Manrope', sans-serif",
+            fontSize: '14px',
+            fontWeight: 700,
+            letterSpacing: '-0.01em',
+            color: textColor,
+            opacity: 0.85,
+          }}
+        >
+          Aline Configurator
+        </span>
+
+        <button
+          onClick={reopenTutorial}
+          title="Show tutorial"
+          style={{
+            width: '26px',
+            height: '26px',
+            borderRadius: '50%',
+            border: `1px solid ${glassBorder}`,
+            backgroundColor: glassPanelBg,
+            backdropFilter: 'blur(12px)',
+            color: textColor,
+            fontFamily: "'Space Grotesk', 'Manrope', sans-serif",
+            fontWeight: 800,
+            fontSize: '12px',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            boxShadow: '0 6px 14px rgba(0,0,0,0.15)',
+            transition: 'transform 0.2s ease',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.1)'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.transform = 'scale(1)'; }}
+        >
+          !
+        </button>
+      </div>
+
       {/* 1. PERSISTENT 3D CANVAS LAYER */}
       <div
         style={{
@@ -806,211 +1106,128 @@ export default function Home() {
         }}
       />
 
-      {/* 3. HERO OVERLAY UI */}
-      <div
-        style={{
-          position: 'absolute',
-          inset: 0,
-          zIndex: 4,
-          padding: '0 80px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          boxSizing: 'border-box',
-          opacity: viewMode === 'hero' ? 1 : 0,
-          pointerEvents: 'none',
-          transform: viewMode === 'hero' ? 'translateY(0)' : 'translateY(-30px)',
-          transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
-        }}
-      >
-        {/* Left Hero Text */}
-        <div style={{ maxWidth: '520px', display: 'flex', flexDirection: 'column', gap: '24px', pointerEvents: viewMode === 'hero' ? 'auto' : 'none' }}>
-          <h1
-            style={{
-              fontFamily: "'Space Grotesk', 'Manrope', sans-serif",
-              fontSize: '4rem',
-              fontWeight: '700',
-              lineHeight: '1.05',
-              letterSpacing: '-0.03em',
-              margin: 0,
-              color: textColor,
-            }}
-          >
-            Aline Configurator
-          </h1>
-
-          <p style={{ fontSize: '1.15rem', color: subTextColor, lineHeight: '1.6', margin: 0 }}>
-            Craft your ultimate physical productivity tool. Customize keybindings, switch profiles, and sync live to RP2040 hardware via Web Serial.
-          </p>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', alignItems: 'flex-start' }}>
-            <button
-              onClick={() => setViewMode('config')}
+      {/* 3. TUTORIAL OVERLAY (tampil di render pertama / dibuka lagi lewat tombol "!") */}
+      {viewMode === 'hero' && (
+        <div style={{ position: 'absolute', inset: 0, zIndex: 40 }}>
+          {/* Spotlight: seluruh layar digelapkan KECUALI kotak target, pakai trik
+              box-shadow raksasa (bukan overlay solid), jadi tidak perlu clip-path
+              rumit dan tetap presisi menempel ke elemen aslinya. */}
+          {tutorialRect ? (
+            <div
               style={{
-                position: 'relative',
-                padding: '18px 40px',
-                fontSize: '1.05rem',
-                fontWeight: '800',
-                color: '#ffffff',
-                background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)',
-                border: '1px solid rgba(255, 255, 255, 0.3)',
+                position: 'fixed',
+                top: tutorialRect.top - 8,
+                left: tutorialRect.left - 8,
+                width: tutorialRect.width + 16,
+                height: tutorialRect.height + 16,
                 borderRadius: '16px',
-                cursor: 'pointer',
-                boxShadow: '0 12px 30px -6px rgba(37, 99, 235, 0.5)',
-                transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '10px',
-                letterSpacing: '0.02em',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = 'translateY(-3px) scale(1.02)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = 'translateY(0) scale(1)';
-              }}
-            >
-              <span>Start Customizing</span>
-              <Settings2 size={18} strokeWidth={2.5} />
-            </button>
-
-            <div
-              onClick={() => setViewMode('config')}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                color: subTextColor,
-                fontSize: '12px',
-                fontWeight: '600',
-                cursor: 'pointer',
-                userSelect: 'none',
-              }}
-            >
-              <ChevronDown size={14} />
-              <span>Scroll down or click to customize</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Right Glass Card */}
-        <div
-          style={{
-            width: '360px',
-            backgroundColor: glassBg,
-            backdropFilter: 'blur(20px)',
-            borderRadius: '28px',
-            padding: '28px',
-            border: `1px solid ${glassBorder}`,
-            boxShadow: '0 30px 60px rgba(0, 0, 0, 0.15)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '20px',
-            pointerEvents: viewMode === 'hero' ? 'auto' : 'none',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-            <div>
-              <div style={{ fontSize: '10px', color: isBgLight ? '#d97706' : '#f59e0b', fontWeight: 'bold', letterSpacing: '0.05em', marginBottom: '4px' }}>
-                LIVE KEYMAP OVERVIEW
-              </div>
-              <div style={{ fontSize: '16px', fontWeight: 'bold', color: textColor }}>
-                5 Physical Keys Mapping
-              </div>
-            </div>
-
-            <div
-              style={{
-                padding: '4px 10px',
-                borderRadius: '8px',
-                backgroundColor: isBgLight ? 'rgba(2, 132, 199, 0.15)' : 'rgba(56, 189, 248, 0.15)',
-                border: isBgLight ? '1px solid rgba(2, 132, 199, 0.3)' : '1px solid rgba(56, 189, 248, 0.3)',
-                color: isBgLight ? '#0284c7' : '#38bdf8',
-                fontSize: '11px',
-                fontWeight: 'bold',
-                maxWidth: '110px',
-                textOverflow: 'ellipsis',
-                overflow: 'hidden',
-                whiteSpace: 'nowrap',
-              }}
-              title={currentModeLabel}
-            >
-              {activeMode === 'modeA' ? 'Mode A' : 'Mode B'}: {currentModeLabel}
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {currentKeymap.map((binding, idx) => (
-              <div
-                key={idx}
-                style={{
-                  padding: '10px 14px',
-                  borderRadius: '12px',
-                  backgroundColor: itemBg,
-                  border: `1px solid ${glassBorder}`,
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <span
-                    style={{
-                      width: '26px',
-                      height: '24px',
-                      borderRadius: '6px',
-                      backgroundColor: currentPalette.keycaps,
-                      color: '#fff',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontSize: '10px',
-                      fontFamily: "'JetBrains Mono', monospace",
-                      fontWeight: '700',
-                      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.35), inset 0 -2px 0 rgba(0,0,0,0.2)',
-                    }}
-                  >
-                    K{idx + 1}
-                  </span>
-                  <span style={{ fontSize: '12px', color: subTextColor }}>Key {idx + 1}</span>
-                </div>
-                <span style={{ fontSize: '12px', fontWeight: '700', fontFamily: "'JetBrains Mono', monospace", color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase', letterSpacing: '0.02em' }}>
-                  {binding || 'Unassigned'}
-                </span>
-              </div>
-            ))}
-          </div>
-
-          <button
-            onClick={isConnected ? handleSaveToRP2040 : connectSerial}
-            style={{
-              padding: '12px',
-              borderRadius: '14px',
-              backgroundColor: isConnected ? '#10b981' : currentPalette.keycaps,
-              border: 'none',
-              color: '#ffffff',
-              fontWeight: 'bold',
-              fontSize: '12px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '8px',
-            }}
-          >
-            <span
-              style={{
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                backgroundColor: isConnected ? '#34d399' : '#f87171',
-                boxShadow: isConnected ? '0 0 8px #34d399' : '0 0 8px #f87171',
+                boxShadow: '0 0 0 9999px rgba(0,0,0,0.6)',
+                border: '2px solid #38bdf8',
+                pointerEvents: 'none',
+                transition: 'top 0.3s cubic-bezier(0.16,1,0.3,1), left 0.3s cubic-bezier(0.16,1,0.3,1), width 0.3s cubic-bezier(0.16,1,0.3,1), height 0.3s cubic-bezier(0.16,1,0.3,1)',
               }}
             />
-            {isConnected ? 'Save Keymap to Hardware' : 'Disconnected: Click to Connect'}
-          </button>
+          ) : (
+            <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.6)', pointerEvents: 'none' }} />
+          )}
+
+          {/* Kartu keterangan step, ditempatkan relatif terhadap kotak target */}
+          {tutorialRect && (() => {
+            const step = TUTORIAL_STEPS[tutorialStep];
+            const CARD_W = 300;
+            const GAP = 16;
+            let cardStyle: React.CSSProperties = {};
+            if (step.placement === 'right') {
+              cardStyle = { top: tutorialRect.top, left: tutorialRect.left + tutorialRect.width + GAP };
+            } else if (step.placement === 'left') {
+              cardStyle = { top: tutorialRect.top, left: tutorialRect.left - CARD_W - GAP };
+            } else if (step.placement === 'top') {
+              cardStyle = { top: tutorialRect.top - GAP, left: tutorialRect.left, transform: 'translateY(-100%)' };
+            } else {
+              cardStyle = { top: tutorialRect.top + tutorialRect.height + GAP, left: Math.max(16, tutorialRect.left + tutorialRect.width / 2 - CARD_W / 2) };
+            }
+            // Jangan sampai kartu keluar layar di kanan/kiri
+            const maxLeft = window.innerWidth - CARD_W - 16;
+            if (typeof cardStyle.left === 'number') cardStyle.left = Math.min(Math.max(16, cardStyle.left), maxLeft);
+
+            // Jangan sampai kartu keluar layar di atas/bawah. Tinggi kartu dinamis
+            // (tergantung panjang teks), jadi pakai perkiraan yang cukup longgar.
+            const ESTIMATED_CARD_H = 230;
+            const maxTop = window.innerHeight - ESTIMATED_CARD_H - 16;
+            if (typeof cardStyle.top === 'number') cardStyle.top = Math.min(Math.max(16, cardStyle.top), maxTop);
+
+            return (
+              <div
+                style={{
+                  position: 'fixed',
+                  ...cardStyle,
+                  width: `${CARD_W}px`,
+                  backgroundColor: glassBg,
+                  backdropFilter: 'blur(20px)',
+                  borderRadius: '18px',
+                  padding: '18px',
+                  border: `1px solid ${glassBorder}`,
+                  boxShadow: '0 20px 40px rgba(0,0,0,0.3)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '10px',
+                  zIndex: 41,
+                }}
+              >
+                <div style={{ fontSize: '9px', fontWeight: 700, color: '#38bdf8', letterSpacing: '0.05em' }}>
+                  STEP {tutorialStep + 1} OF {TUTORIAL_STEPS.length}
+                </div>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: textColor, fontFamily: "'Space Grotesk', 'Manrope', sans-serif" }}>
+                  {step.title}
+                </div>
+                <div style={{ fontSize: '11.5px', color: subTextColor, lineHeight: 1.5 }}>
+                  {step.body}
+                </div>
+                <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                  {tutorialStep > 0 && (
+                    <button
+                      onClick={() => setTutorialStep((s) => s - 1)}
+                      style={{ padding: '8px 12px', fontSize: '11px', fontWeight: 700, borderRadius: '8px', border: `1px solid ${glassBorder}`, backgroundColor: 'transparent', color: textColor, cursor: 'pointer' }}
+                    >
+                      Back
+                    </button>
+                  )}
+                  <button
+                    onClick={dismissTutorial}
+                    style={{ padding: '8px 12px', fontSize: '11px', fontWeight: 700, borderRadius: '8px', border: 'none', backgroundColor: 'transparent', color: subTextColor, cursor: 'pointer' }}
+                  >
+                    Skip
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (tutorialStep < TUTORIAL_STEPS.length - 1) setTutorialStep((s) => s + 1);
+                      else dismissTutorial();
+                    }}
+                    style={{
+                      flex: 1,
+                      padding: '8px 12px',
+                      fontSize: '11px',
+                      fontWeight: 800,
+                      borderRadius: '8px',
+                      border: 'none',
+                      background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)',
+                      color: '#fff',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {tutorialStep < TUTORIAL_STEPS.length - 1 ? 'Next' : 'Start Configuring'}
+                  </button>
+                </div>
+                <div style={{ fontSize: '8.5px', color: subTextColor, textAlign: 'center' }}>
+                  Press Esc or click Skip anytime
+                </div>
+              </div>
+            );
+          })()}
         </div>
-      </div>
+      )}
+
+
 
       {/* 4. CONFIGURATOR OVERLAY UI */}
       <div
@@ -1018,10 +1235,9 @@ export default function Home() {
           position: 'absolute',
           inset: 0,
           zIndex: 4,
-          opacity: viewMode === 'config' ? 1 : 0,
+          opacity: 1,
           pointerEvents: 'none',
-          transform: viewMode === 'config' ? 'translateY(0)' : 'translateY(30px)',
-          transition: 'all 0.6s cubic-bezier(0.16, 1, 0.3, 1)',
+          transition: 'opacity 0.5s ease',
         }}
       >
         {/* Sync Status Banner (dari respons SET_KEYMAP firmware) */}
@@ -1051,6 +1267,7 @@ export default function Home() {
 
         {/* Live Test — pill kecil di kanan atas, sengaja minim teks */}
         <div
+          ref={tutorialLiveTestRef}
           style={{
             position: 'absolute',
             top: '30px',
@@ -1123,34 +1340,7 @@ export default function Home() {
           }}
         >
           <button
-            onClick={() => {
-              setViewMode('hero');
-              setSelectedKeyName(null);
-              setEditingHoldBinding(false);
-            }}
-            style={{
-              padding: '10px 20px',
-              borderRadius: '12px',
-              border: `1px solid ${glassBorder}`,
-              backgroundColor: glassPanelBg,
-              color: textColor,
-              fontWeight: 'bold',
-              cursor: 'pointer',
-              fontSize: '12px',
-              backdropFilter: 'blur(12px)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              transition: 'transform 0.2s ease',
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
-            onMouseLeave={(e) => { e.currentTarget.style.transform = 'translateY(0)'; }}
-          >
-            <ArrowLeft size={14} />
-            Back to Overview
-          </button>
-
-          <button
+            ref={tutorialConnectRef}
             onClick={connectSerial}
             style={{
               padding: '10px 20px',
@@ -1249,8 +1439,125 @@ export default function Home() {
             pointerEvents: viewMode === 'config' ? 'auto' : 'none',
           }}
         >
+          {/* Presets */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <span style={{ fontSize: '11px', fontWeight: 'bold', color: isBgLight ? '#d97706' : '#f59e0b' }}>
+              PRESETS
+            </span>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <select
+                value={selectedPresetId}
+                onChange={(e) => setSelectedPresetId(e.target.value)}
+                style={{
+                  flex: 1,
+                  padding: '7px 8px',
+                  fontSize: '10px',
+                  borderRadius: '8px',
+                  border: `1px solid ${glassBorder}`,
+                  backgroundColor: itemBg,
+                  color: textColor,
+                  cursor: 'pointer',
+                }}
+              >
+                <option value="" style={{ backgroundColor: isBgLight ? '#ffffff' : '#1e293b', color: textColor }}>
+                  Choose a preset…
+                </option>
+                <optgroup label="Built-in" style={{ backgroundColor: isBgLight ? '#ffffff' : '#1e293b', color: subTextColor }}>
+                  {BUILT_IN_PRESETS.map((p) => (
+                    <option key={p.id} value={p.id} style={{ backgroundColor: isBgLight ? '#ffffff' : '#1e293b', color: textColor }}>
+                      {p.name}
+                    </option>
+                  ))}
+                </optgroup>
+                {userPresets.length > 0 && (
+                  <optgroup label="My Presets" style={{ backgroundColor: isBgLight ? '#ffffff' : '#1e293b', color: subTextColor }}>
+                    {userPresets.map((p) => (
+                      <option key={p.id} value={p.id} style={{ backgroundColor: isBgLight ? '#ffffff' : '#1e293b', color: textColor }}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+              <button
+                onClick={handleLoadSelectedPreset}
+                disabled={!selectedPresetId}
+                style={{
+                  padding: '7px 12px',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  borderRadius: '8px',
+                  border: 'none',
+                  backgroundColor: selectedPresetId ? '#2563eb' : '#6b7280',
+                  color: '#fff',
+                  cursor: selectedPresetId ? 'pointer' : 'not-allowed',
+                  opacity: selectedPresetId ? 1 : 0.6,
+                }}
+              >
+                Load
+              </button>
+              {userPresets.some((p) => p.id === selectedPresetId) && (
+                <button
+                  onClick={() => { deleteUserPreset(selectedPresetId); setSelectedPresetId(''); }}
+                  title="Delete this preset"
+                  style={{
+                    padding: '7px 9px',
+                    borderRadius: '8px',
+                    border: `1px solid ${glassBorder}`,
+                    backgroundColor: 'transparent',
+                    color: '#ef4444',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                  }}
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <input
+                type="text"
+                value={newPresetName}
+                onChange={(e) => setNewPresetName(e.target.value)}
+                placeholder="Name this setup…"
+                style={{
+                  flex: 1,
+                  padding: '7px 8px',
+                  fontSize: '10px',
+                  borderRadius: '8px',
+                  border: `1px solid ${glassBorder}`,
+                  backgroundColor: itemBg,
+                  color: textColor,
+                  outline: 'none',
+                }}
+              />
+              <button
+                onClick={() => { saveCurrentAsPreset(newPresetName); setNewPresetName(''); }}
+                disabled={!newPresetName.trim()}
+                title="Save current keymap as a new preset"
+                style={{
+                  padding: '7px 12px',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  borderRadius: '8px',
+                  border: `1px solid ${glassBorder}`,
+                  backgroundColor: itemBg,
+                  color: textColor,
+                  cursor: newPresetName.trim() ? 'pointer' : 'not-allowed',
+                  opacity: newPresetName.trim() ? 1 : 0.5,
+                }}
+              >
+                Save
+              </button>
+            </div>
+            <span style={{ fontSize: '8.5px', color: subTextColor, lineHeight: 1.4 }}>
+              Loading a preset replaces your current keymap, combos, and timing settings. Save your current setup first if you want to keep it.
+            </span>
+          </div>
+
           {/* Export / Import Config */}
-          <div style={{ display: 'flex', gap: '6px' }}>
+          <div ref={tutorialExportRef} style={{ display: 'flex', gap: '6px' }}>
             <button
               onClick={handleExportConfig}
               title="Export config as JSON"
@@ -1356,6 +1663,7 @@ export default function Home() {
               <button
                 onClick={() => setActiveMode('modeA')}
                 style={{
+                  position: 'relative',
                   flex: 1,
                   padding: '6px',
                   fontSize: '11px',
@@ -1368,10 +1676,27 @@ export default function Home() {
                 }}
               >
                 Mode A
+                {hardwareActiveMode === 'A' && (
+                  <span
+                    title="Physically active on hardware right now"
+                    style={{
+                      position: 'absolute',
+                      top: '-3px',
+                      right: '-3px',
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      backgroundColor: '#10b981',
+                      border: '2px solid rgba(0,0,0,0.2)',
+                      animation: 'pulseDot 1.4s ease-in-out infinite',
+                    }}
+                  />
+                )}
               </button>
               <button
                 onClick={() => setActiveMode('modeB')}
                 style={{
+                  position: 'relative',
                   flex: 1,
                   padding: '6px',
                   fontSize: '11px',
@@ -1384,8 +1709,31 @@ export default function Home() {
                 }}
               >
                 Mode B
+                {hardwareActiveMode === 'B' && (
+                  <span
+                    title="Physically active on hardware right now"
+                    style={{
+                      position: 'absolute',
+                      top: '-3px',
+                      right: '-3px',
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      backgroundColor: '#10b981',
+                      border: '2px solid rgba(0,0,0,0.2)',
+                      animation: 'pulseDot 1.4s ease-in-out infinite',
+                    }}
+                  />
+                )}
               </button>
             </div>
+
+            {isConnected && hardwareActiveMode && (
+              <div style={{ fontSize: '9px', color: subTextColor, textAlign: 'center' }}>
+                Hardware switch is currently on <strong style={{ color: '#10b981' }}>Mode {hardwareActiveMode}</strong>
+                {activeMode !== (hardwareActiveMode === 'A' ? 'modeA' : 'modeB') && " — you're editing a different mode"}
+              </div>
+            )}
 
             <input
               type="text"
@@ -1411,7 +1759,7 @@ export default function Home() {
           </div>
 
           {/* Quick Select Key */}
-          <div>
+          <div ref={tutorialSelectKeyRef}>
             <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '6px', color: isBgLight ? '#d97706' : '#f59e0b' }}>
               SELECT KEY TO EDIT:
             </div>
@@ -1419,6 +1767,8 @@ export default function Home() {
               {[0, 1, 2, 3, 4].map((idx) => {
                 const keyName = `key_${idx + 1}`;
                 const isHighlighted = highlightedKeys.includes(idx);
+                const currentHoldKeymap = activeMode === 'modeA' ? modeAHold : modeBHold;
+                const hasHold = !!currentHoldKeymap[idx];
                 return (
                   <div
                     key={keyName}
@@ -1426,6 +1776,7 @@ export default function Home() {
                     style={{
                       display: 'flex',
                       justifyContent: 'space-between',
+                      alignItems: 'center',
                       padding: '6px 8px',
                       borderRadius: '6px',
                       backgroundColor: selectedKeyName === keyName ? (isBgLight ? 'rgba(217, 119, 6, 0.15)' : 'rgba(245, 158, 11, 0.2)') : 'transparent',
@@ -1435,7 +1786,22 @@ export default function Home() {
                       transition: 'background-color 0.15s ease, box-shadow 0.3s ease',
                     }}
                   >
-                    <span style={{ color: subTextColor }}>Key {idx + 1}:</span>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '5px', color: subTextColor }}>
+                      Key {idx + 1}:
+                      {hasHold && (
+                        <span
+                          title={`Hold binding: ${currentHoldKeymap[idx]}`}
+                          style={{
+                            width: '6px',
+                            height: '6px',
+                            borderRadius: '50%',
+                            backgroundColor: '#f59e0b',
+                            boxShadow: '0 0 4px rgba(245, 158, 11, 0.8)',
+                            flexShrink: 0,
+                          }}
+                        />
+                      )}
+                    </span>
                     <span style={{ fontWeight: '700', fontFamily: "'JetBrains Mono', monospace", color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase' }}>
                       {currentKeymap[idx] || 'empty'}
                     </span>
@@ -1448,7 +1814,7 @@ export default function Home() {
           <hr style={{ borderColor: glassBorder, margin: 0 }} />
 
           {/* MODUL COMBO RULES (CHORDING) */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div ref={tutorialComboRef} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: '11px', fontWeight: 'bold', color: isBgLight ? '#10b981' : '#34d399' }}>
                 COMBO RULES ({combos.length}/{MAX_COMBOS})
@@ -1633,7 +1999,7 @@ export default function Home() {
           </div>
 
           {/* MODUL TAP VS HOLD */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          <div ref={tutorialHoldRef} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
             <span style={{ fontSize: '11px', fontWeight: 'bold', color: isBgLight ? '#0284c7' : '#38bdf8' }}>
               TAP vs HOLD
             </span>
@@ -1693,6 +2059,45 @@ export default function Home() {
               </button>
             </div>
 
+            {(() => {
+              // Nilai binding yang sedang aktif untuk target manapun yang sedang diedit
+              // (combo Out A/B, tap tombol fisik, atau hold tombol fisik) -- dipakai
+              // untuk menampilkan preview + tombol Clear yang seragam di ketiganya.
+              let currentValue = '';
+              if (comboEditTarget) {
+                currentValue = combos[comboEditTarget.index]?.[comboEditTarget.field] || '';
+              } else if (selectedKeyName) {
+                const idx = parseInt(selectedKeyName.replace('key_', '')) - 1;
+                currentValue = editingHoldBinding
+                  ? (activeMode === 'modeA' ? modeAHold[idx] : modeBHold[idx])
+                  : (activeMode === 'modeA' ? modeA[idx] : modeB[idx]);
+              }
+              if (!currentValue) return null;
+              return (
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginBottom: '10px',
+                    padding: '6px 10px',
+                    borderRadius: '8px',
+                    backgroundColor: itemBg,
+                  }}
+                >
+                  <span style={{ fontSize: '10px', fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: isBgLight ? '#0284c7' : '#38bdf8', textTransform: 'uppercase' }}>
+                    {currentValue}
+                  </span>
+                  <span
+                    onClick={() => assignBinding('')}
+                    style={{ fontSize: '10px', color: '#ef4444', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }}
+                  >
+                    Clear
+                  </span>
+                </div>
+              );
+            })()}
+
             {!comboEditTarget && selectedKeyName && (() => {
               const editingKeyIndex = parseInt(selectedKeyName.replace('key_', '')) - 1;
               const currentHoldVal = activeMode === 'modeA' ? modeAHold[editingKeyIndex] : modeBHold[editingKeyIndex];
@@ -1735,17 +2140,6 @@ export default function Home() {
                   {editingHoldBinding && (
                     <div style={{ fontSize: '8.5px', color: subTextColor, marginTop: '6px', lineHeight: 1.4 }}>
                       Activates only if this key is held past the Hold Threshold (see TAP vs HOLD section below).
-                      {currentHoldVal && (
-                        <>
-                          {' '}
-                          <span
-                            onClick={() => assignBinding('')}
-                            style={{ color: '#ef4444', fontWeight: 700, cursor: 'pointer', textDecoration: 'underline' }}
-                          >
-                            Clear hold binding
-                          </span>
-                        </>
-                      )}
                     </div>
                   )}
                 </div>
